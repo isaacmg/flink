@@ -23,6 +23,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.RichCoMapFunction;
 import org.apache.flink.streaming.api.graph.StreamConfig;
@@ -42,8 +43,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * Tests for {@link org.apache.flink.streaming.runtime.tasks.TwoInputStreamTask}. Theses tests
  * implicitly also test the {@link org.apache.flink.streaming.runtime.io.StreamTwoInputProcessor}.
  *
- * <p>
- * Note:<br>
+ * <p>Note:<br>
  * We only use a {@link CoStreamMap} operator here. We also test the individual operators but Map is
  * used as a representative to test TwoInputStreamTask, since TwoInputStreamTask is used for all
  * TwoInputStreamOperators.
@@ -65,6 +65,7 @@ public class TwoInputStreamTaskTest {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		CoStreamMap<String, Integer, String> coMapOperator = new CoStreamMap<String, Integer, String>(new TestOpenCloseMapFunction());
 		streamConfig.setStreamOperator(coMapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		long initialTime = 0L;
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
@@ -111,6 +112,7 @@ public class TwoInputStreamTaskTest {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		CoStreamMap<String, Integer, String> coMapOperator = new CoStreamMap<String, Integer, String>(new IdentityMap());
 		streamConfig.setStreamOperator(coMapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -122,7 +124,6 @@ public class TwoInputStreamTaskTest {
 		testHarness.processElement(new Watermark(initialTime), 0, 1);
 
 		testHarness.processElement(new Watermark(initialTime), 1, 0);
-
 
 		// now the output should still be empty
 		testHarness.waitForInputProcessing();
@@ -154,7 +155,6 @@ public class TwoInputStreamTaskTest {
 		expectedOutput.add(new Watermark(initialTime + 2));
 		testHarness.waitForInputProcessing();
 		TestHarnessUtil.assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
-
 
 		// advance watermark from one of the inputs, now we should get a new one since the
 		// minimum increases
@@ -219,6 +219,7 @@ public class TwoInputStreamTaskTest {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		CoStreamMap<String, Integer, String> coMapOperator = new CoStreamMap<String, Integer, String>(new IdentityMap());
 		streamConfig.setStreamOperator(coMapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -279,7 +280,6 @@ public class TwoInputStreamTaskTest {
 				expectedOutput,
 				testHarness.getOutput());
 
-
 		List<String> resultElements = TestHarnessUtil.getRawElementsFromOutput(testHarness.getOutput());
 		Assert.assertEquals(4, resultElements.size());
 	}
@@ -300,6 +300,7 @@ public class TwoInputStreamTaskTest {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		CoStreamMap<String, Integer, String> coMapOperator = new CoStreamMap<String, Integer, String>(new IdentityMap());
 		streamConfig.setStreamOperator(coMapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -346,14 +347,12 @@ public class TwoInputStreamTaskTest {
 				expectedOutput,
 				testHarness.getOutput());
 
-
 		// Then give the earlier barrier, these should be ignored
 		testHarness.processEvent(new CheckpointBarrier(0, 0, CheckpointOptions.forFullCheckpoint()), 0, 1);
 		testHarness.processEvent(new CheckpointBarrier(0, 0, CheckpointOptions.forFullCheckpoint()), 1, 0);
 		testHarness.processEvent(new CheckpointBarrier(0, 0, CheckpointOptions.forFullCheckpoint()), 1, 1);
 
 		testHarness.waitForInputProcessing();
-
 
 		testHarness.endInput();
 

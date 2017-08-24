@@ -19,30 +19,29 @@
 package org.apache.flink.runtime.blob;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
+import org.apache.flink.util.TestLogger;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Random;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-public class BlobRecoveryITCase {
+public class BlobRecoveryITCase extends TestLogger {
 
 	@Rule
 	public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -56,12 +55,23 @@ public class BlobRecoveryITCase {
 		Configuration config = new Configuration();
 		config.setString(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
 		config.setString(CoreOptions.STATE_BACKEND, "FILESYSTEM");
-		config.setString(HighAvailabilityOptions.HA_STORAGE_PATH, temporaryFolder.getRoot().getPath());
+		config.setString(BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
+		config.setString(HighAvailabilityOptions.HA_STORAGE_PATH, temporaryFolder.newFolder().getPath());
 
-		testBlobServerRecovery(config);
+		BlobStoreService blobStoreService = null;
+
+		try {
+			blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
+
+			testBlobServerRecovery(config, blobStoreService);
+		} finally {
+			if (blobStoreService != null) {
+				blobStoreService.closeAndCleanupAllData();
+			}
+		}
 	}
 
-	public static void testBlobServerRecovery(final Configuration config) throws IOException {
+	public static void testBlobServerRecovery(final Configuration config, final BlobStore blobStore) throws IOException {
 		final String clusterId = config.getString(HighAvailabilityOptions.HA_CLUSTER_ID);
 		String storagePath = config.getString(HighAvailabilityOptions.HA_STORAGE_PATH) + "/" + clusterId;
 		Random rand = new Random();
@@ -72,7 +82,7 @@ public class BlobRecoveryITCase {
 
 		try {
 			for (int i = 0; i < server.length; i++) {
-				server[i] = new BlobServer(config);
+				server[i] = new BlobServer(config, blobStore);
 				serverAddress[i] = new InetSocketAddress("localhost", server[i].getPort());
 			}
 
@@ -84,15 +94,17 @@ public class BlobRecoveryITCase {
 
 			BlobKey[] keys = new BlobKey[2];
 
-			// Put data
-			keys[0] = client.put(expected); // Request 1
-			keys[1] = client.put(expected, 32, 256); // Request 2
+			// Put job-unrelated data
+			keys[0] = client.put(null, expected); // Request 1
+			keys[1] = client.put(null, expected, 32, 256); // Request 2
 
+			// Put job-related data, verify that the checksums match
 			JobID[] jobId = new JobID[] { new JobID(), new JobID() };
-			String[] testKey = new String[] { "test-key-1", "test-key-2" };
-
-			client.put(jobId[0], testKey[0], expected); // Request 3
-			client.put(jobId[1], testKey[1], expected, 32, 256); // Request 4
+			BlobKey key;
+			key = client.put(jobId[0], expected); // Request 3
+			assertEquals(keys[0], key);
+			key = client.put(jobId[1], expected, 32, 256); // Request 4
+			assertEquals(keys[1], key);
 
 			// check that the storage directory exists
 			final Path blobServerPath = new Path(storagePath, "blob");
@@ -125,7 +137,7 @@ public class BlobRecoveryITCase {
 			}
 
 			// Verify request 3
-			try (InputStream is = client.get(jobId[0], testKey[0])) {
+			try (InputStream is = client.get(jobId[0], keys[0])) {
 				byte[] actual = new byte[expected.length];
 				BlobUtils.readFully(is, actual, 0, expected.length, null);
 
@@ -135,7 +147,7 @@ public class BlobRecoveryITCase {
 			}
 
 			// Verify request 4
-			try (InputStream is = client.get(jobId[1], testKey[1])) {
+			try (InputStream is = client.get(jobId[1], keys[1])) {
 				byte[] actual = new byte[256];
 				BlobUtils.readFully(is, actual, 0, 256, null);
 
@@ -147,8 +159,8 @@ public class BlobRecoveryITCase {
 			// Remove again
 			client.delete(keys[0]);
 			client.delete(keys[1]);
-			client.delete(jobId[0], testKey[0]);
-			client.delete(jobId[1], testKey[1]);
+			client.delete(jobId[0], keys[0]);
+			client.delete(jobId[1], keys[1]);
 
 			// Verify everything is clean
 			assertTrue("HA storage directory does not exist", fs.exists(new Path(storagePath)));
@@ -165,7 +177,7 @@ public class BlobRecoveryITCase {
 		finally {
 			for (BlobServer s : server) {
 				if (s != null) {
-					s.shutdown();
+					s.close();
 				}
 			}
 

@@ -19,20 +19,23 @@
 package org.apache.flink.runtime.jobmanager;
 
 import akka.actor.ActorSystem;
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.akka.ListeningBehaviour;
 import org.apache.flink.runtime.blob.BlobClient;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.client.JobExecutionException;
+import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.highavailability.nonha.embedded.EmbeddedHaServices;
 import org.apache.flink.runtime.instance.ActorGateway;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
-import org.apache.flink.runtime.jobgraph.tasks.JobSnapshottingSettings;
+import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 import org.apache.flink.runtime.messages.JobManagerMessages;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
@@ -68,6 +71,7 @@ public class JobSubmitTest {
 	private static ActorSystem jobManagerSystem;
 	private static ActorGateway jmGateway;
 	private static Configuration jmConfig;
+	private static HighAvailabilityServices highAvailabilityServices;
 
 	@BeforeClass
 	public static void setupJobManager() {
@@ -75,11 +79,13 @@ public class JobSubmitTest {
 
 		int port = NetUtils.getAvailablePort();
 
-		jmConfig.setString(ConfigConstants.JOB_MANAGER_IPC_ADDRESS_KEY, "localhost");
-		jmConfig.setInteger(ConfigConstants.JOB_MANAGER_IPC_PORT_KEY, port);
+		jmConfig.setString(JobManagerOptions.ADDRESS, "localhost");
+		jmConfig.setInteger(JobManagerOptions.PORT, port);
 
 		scala.Option<Tuple2<String, Object>> listeningAddress = scala.Option.apply(new Tuple2<String, Object>("localhost", port));
 		jobManagerSystem = AkkaUtils.createActorSystem(jmConfig, listeningAddress);
+
+		highAvailabilityServices = new EmbeddedHaServices(TestingUtils.defaultExecutor());
 
 		// only start JobManager (no ResourceManager)
 		JobManager.startJobManagerActors(
@@ -87,11 +93,12 @@ public class JobSubmitTest {
 			jobManagerSystem,
 			TestingUtils.defaultExecutor(),
 			TestingUtils.defaultExecutor(),
+			highAvailabilityServices,
 			JobManager.class,
 			MemoryArchivist.class)._1();
 
 		try {
-			LeaderRetrievalService lrs = LeaderRetrievalUtils.createLeaderRetrievalService(jmConfig);
+			LeaderRetrievalService lrs = highAvailabilityServices.getJobManagerLeaderRetriever(HighAvailabilityServices.DEFAULT_JOB_ID);
 
 			jmGateway = LeaderRetrievalUtils.retrieveLeaderGateway(
 					lrs,
@@ -104,9 +111,14 @@ public class JobSubmitTest {
 	}
 
 	@AfterClass
-	public static void teardownJobmanager() {
+	public static void teardownJobmanager() throws Exception {
 		if (jobManagerSystem != null) {
 			jobManagerSystem.shutdown();
+		}
+
+		if (highAvailabilityServices != null) {
+			highAvailabilityServices.closeAndCleanupAllData();
+			highAvailabilityServices = null;
 		}
 	}
 
@@ -125,12 +137,13 @@ public class JobSubmitTest {
 			// upload two dummy bytes and add their keys to the job graph as dependencies
 			BlobKey key1, key2;
 			BlobClient bc = new BlobClient(new InetSocketAddress("localhost", blobPort), jmConfig);
+			JobID jobId = jg.getJobID();
 			try {
-				key1 = bc.put(new byte[10]);
-				key2 = bc.put(new byte[10]);
+				key1 = bc.put(jobId, new byte[10]);
+				key2 = bc.put(jobId, new byte[10]);
 
 				// delete one of the blobs to make sure that the startup failed
-				bc.delete(key2);
+				bc.delete(jobId, key2);
 			}
 			finally {
 				bc.close();
@@ -228,7 +241,7 @@ public class JobSubmitTest {
 		List<JobVertexID> vertexIdList = Collections.singletonList(jobVertex.getID());
 
 		JobGraph jg = new JobGraph("test job", jobVertex);
-		jg.setSnapshotSettings(new JobSnapshottingSettings(vertexIdList, vertexIdList, vertexIdList,
+		jg.setSnapshotSettings(new JobCheckpointingSettings(vertexIdList, vertexIdList, vertexIdList,
 			5000, 5000, 0L, 10, ExternalizedCheckpointSettings.none(), null, true));
 		return jg;
 	}

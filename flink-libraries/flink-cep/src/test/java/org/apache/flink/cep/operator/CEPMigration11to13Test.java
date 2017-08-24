@@ -20,8 +20,6 @@ package org.apache.flink.cep.operator;
 
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeutils.base.ByteSerializer;
-import org.apache.flink.api.common.typeutils.base.IntSerializer;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.functions.NullByteKeySelector;
 import org.apache.flink.cep.Event;
 import org.apache.flink.cep.SubEvent;
@@ -32,17 +30,23 @@ import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.OperatorStateHandles;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
+
 import org.junit.Test;
 
 import java.net.URL;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+/**
+ * Tests for migration from 1.1.x to 1.3.x.
+ */
 public class CEPMigration11to13Test {
 
 	private static String getResourceFilename(String filename) {
@@ -57,15 +61,6 @@ public class CEPMigration11to13Test {
 	@Test
 	public void testKeyedCEPOperatorMigratation() throws Exception {
 
-		KeySelector<Event, Integer> keySelector = new KeySelector<Event, Integer>() {
-			private static final long serialVersionUID = -4873366487571254798L;
-
-			@Override
-			public Integer getKey(Event value) throws Exception {
-				return value.getId();
-			}
-		};
-
 		final Event startEvent = new Event(42, "start", 1.0);
 		final SubEvent middleEvent = new SubEvent(42, "foo", 1.0, 10.0);
 		final Event endEvent = new Event(42, "end", 1.0);
@@ -73,7 +68,7 @@ public class CEPMigration11to13Test {
 		// uncomment these lines for regenerating the snapshot on Flink 1.1
 		/*
 		OneInputStreamOperatorTestHarness<Event, Map<String, Event>> harness = new OneInputStreamOperatorTestHarness<>(
-				new KeyedCEPPatternOperator<>(
+				new KeyedCepOperator<>(
 						Event.createTypeSerializer(),
 						false,
 						keySelector,
@@ -85,56 +80,96 @@ public class CEPMigration11to13Test {
 		harness.processElement(new StreamRecord<Event>(new Event(42, "foobar", 1.0), 2));
 		harness.processElement(new StreamRecord<Event>(new SubEvent(42, "barfoo", 1.0, 5.0), 3));
 		harness.processWatermark(new Watermark(2));
+
+		harness.processElement(new StreamRecord<Event>(middleEvent, 3));
+
 		// simulate snapshot/restore with empty element queue but NFA state
 		StreamTaskState snapshot = harness.snapshot(1, 1);
 		FileOutputStream out = new FileOutputStream(
-				"src/test/resources/cep-keyed-snapshot-1.1");
+				"src/test/resources/cep-keyed-1_1-snapshot");
 		ObjectOutputStream oos = new ObjectOutputStream(out);
 		oos.writeObject(snapshot);
 		out.close();
 		harness.close();
 		*/
 
-		OneInputStreamOperatorTestHarness<Event, Map<String, Event>> harness =
-				new KeyedOneInputStreamOperatorTestHarness<>(
-						new KeyedCEPPatternOperator<>(
-								Event.createTypeSerializer(),
-								false,
-								keySelector,
-								IntSerializer.INSTANCE,
-								new NFAFactory(),
-								true),
-						keySelector,
-						BasicTypeInfo.INT_TYPE_INFO);
+		OneInputStreamOperatorTestHarness<Event, Map<String, List<Event>>> harness = CepOperatorTestUtilities.getCepTestHarness(
+			CepOperatorTestUtilities.getKeyedCepOpearator(false, new NFAFactory()));
 
-		harness.setup();
-		harness.initializeStateFromLegacyCheckpoint(getResourceFilename("cep-keyed-snapshot-1.1"));
-		harness.open();
+		try {
+			harness.setup();
+			harness
+				.initializeStateFromLegacyCheckpoint(getResourceFilename("cep-keyed-1_1-snapshot"));
+			harness.open();
 
-		harness.processElement(new StreamRecord<Event>(middleEvent, 3));
-		harness.processElement(new StreamRecord<>(new Event(42, "start", 1.0), 4));
-		harness.processElement(new StreamRecord<>(endEvent, 5));
+			harness.processElement(new StreamRecord<>(new Event(42, "start", 1.0), 4));
+			harness.processElement(new StreamRecord<>(endEvent, 5));
 
-		harness.processWatermark(new Watermark(20));
+			harness.processWatermark(new Watermark(20));
 
-		ConcurrentLinkedQueue<Object> result = harness.getOutput();
+			ConcurrentLinkedQueue<Object> result = harness.getOutput();
 
-		// watermark and the result
-		assertEquals(2, result.size());
+			// watermark and the result
+			assertEquals(2, result.size());
 
-		Object resultObject = result.poll();
-		assertTrue(resultObject instanceof StreamRecord);
-		StreamRecord<?> resultRecord = (StreamRecord<?>) resultObject;
-		assertTrue(resultRecord.getValue() instanceof Map);
+			Object resultObject = result.poll();
+			assertTrue(resultObject instanceof StreamRecord);
+			StreamRecord<?> resultRecord = (StreamRecord<?>) resultObject;
+			assertTrue(resultRecord.getValue() instanceof Map);
 
-		@SuppressWarnings("unchecked")
-		Map<String, Event> patternMap = (Map<String, Event>) resultRecord.getValue();
+			@SuppressWarnings("unchecked")
+			Map<String, List<Event>> patternMap =
+				(Map<String, List<Event>>) resultRecord.getValue();
 
-		assertEquals(startEvent, patternMap.get("start"));
-		assertEquals(middleEvent, patternMap.get("middle"));
-		assertEquals(endEvent, patternMap.get("end"));
+			assertEquals(startEvent, patternMap.get("start").get(0));
+			assertEquals(middleEvent, patternMap.get("middle").get(0));
+			assertEquals(endEvent, patternMap.get("end").get(0));
 
-		harness.close();
+			// and now go for a checkpoint with the new serializers
+
+			final Event startEvent1 = new Event(42, "start", 2.0);
+			final SubEvent middleEvent1 = new SubEvent(42, "foo", 1.0, 11.0);
+			final Event endEvent1 = new Event(42, "end", 2.0);
+
+			harness.processElement(new StreamRecord<Event>(startEvent1, 21));
+			harness.processElement(new StreamRecord<Event>(middleEvent1, 23));
+
+			// simulate snapshot/restore with some elements in internal sorting queue
+			OperatorStateHandles snapshot = harness.snapshot(1L, 1L);
+			harness.close();
+
+			harness = CepOperatorTestUtilities.getCepTestHarness(CepOperatorTestUtilities.getKeyedCepOpearator(
+				false,
+				new NFAFactory()));
+
+			harness.setup();
+			harness.initializeState(snapshot);
+			harness.open();
+
+			harness.processElement(new StreamRecord<>(endEvent1, 25));
+
+			harness.processWatermark(new Watermark(50));
+
+			result = harness.getOutput();
+
+			// watermark and the result
+			assertEquals(2, result.size());
+
+			Object resultObject1 = result.poll();
+			assertTrue(resultObject1 instanceof StreamRecord);
+			StreamRecord<?> resultRecord1 = (StreamRecord<?>) resultObject1;
+			assertTrue(resultRecord1.getValue() instanceof Map);
+
+			@SuppressWarnings("unchecked")
+			Map<String, List<Event>> patternMap1 =
+				(Map<String, List<Event>>) resultRecord1.getValue();
+
+			assertEquals(startEvent1, patternMap1.get("start").get(0));
+			assertEquals(middleEvent1, patternMap1.get("middle").get(0));
+			assertEquals(endEvent1, patternMap1.get("end").get(0));
+		} finally {
+			harness.close();
+		}
 	}
 
 	@Test
@@ -142,7 +177,7 @@ public class CEPMigration11to13Test {
 
 		final Event startEvent = new Event(42, "start", 1.0);
 		final SubEvent middleEvent = new SubEvent(42, "foo", 1.0, 10.0);
-		final Event endEvent=  new Event(42, "end", 1.0);
+		final Event endEvent = new Event(42, "end", 1.0);
 
 		// uncomment these lines for regenerating the snapshot on Flink 1.1
 		/*
@@ -157,10 +192,12 @@ public class CEPMigration11to13Test {
 		harness.processElement(new StreamRecord<Event>(new SubEvent(42, "barfoo", 1.0, 5.0), 3));
 		harness.processWatermark(new Watermark(2));
 
+		harness.processElement(new StreamRecord<Event>(middleEvent, 3));
+
 		// simulate snapshot/restore with empty element queue but NFA state
 		StreamTaskState snapshot = harness.snapshot(1, 1);
 		FileOutputStream out = new FileOutputStream(
-				"src/test/resources/cep-non-keyed-snapshot-1.1");
+				"src/test/resources/cep-non-keyed-1.1-snapshot");
 		ObjectOutputStream oos = new ObjectOutputStream(out);
 		oos.writeObject(snapshot);
 		out.close();
@@ -169,46 +206,87 @@ public class CEPMigration11to13Test {
 
 		NullByteKeySelector keySelector = new NullByteKeySelector();
 
-		OneInputStreamOperatorTestHarness<Event, Map<String, Event>> harness =
-				new KeyedOneInputStreamOperatorTestHarness<>(
-						new KeyedCEPPatternOperator<>(
-								Event.createTypeSerializer(),
-								false,
-								keySelector,
-								ByteSerializer.INSTANCE,
-								new NFAFactory(),
-								false),
-						keySelector,
-						BasicTypeInfo.BYTE_TYPE_INFO);
+		OneInputStreamOperatorTestHarness<Event, Map<String, List<Event>>> harness =
+			new KeyedOneInputStreamOperatorTestHarness<Byte, Event, Map<String, List<Event>>>(
+				CepOperatorTestUtilities.getKeyedCepOpearator(false, new NFAFactory(), ByteSerializer.INSTANCE, false, null),
+				keySelector,
+				BasicTypeInfo.BYTE_TYPE_INFO);
 
-		harness.setup();
-		harness.initializeStateFromLegacyCheckpoint(getResourceFilename("cep-non-keyed-snapshot-1.1"));
-		harness.open();
+		try {
+			harness.setup();
+			harness.initializeStateFromLegacyCheckpoint(
+				getResourceFilename("cep-non-keyed-1.1-snapshot"));
+			harness.open();
 
-		harness.processElement(new StreamRecord<Event>(middleEvent, 3));
-		harness.processElement(new StreamRecord<>(new Event(42, "start", 1.0), 4));
-		harness.processElement(new StreamRecord<>(endEvent, 5));
+			harness.processElement(new StreamRecord<>(new Event(42, "start", 1.0), 4));
+			harness.processElement(new StreamRecord<>(endEvent, 5));
 
-		harness.processWatermark(new Watermark(Long.MAX_VALUE));
+			harness.processWatermark(new Watermark(20));
 
-		ConcurrentLinkedQueue<Object> result = harness.getOutput();
+			ConcurrentLinkedQueue<Object> result = harness.getOutput();
 
-		// watermark and the result
-		assertEquals(2, result.size());
+			// watermark and the result
+			assertEquals(2, result.size());
 
-		Object resultObject = result.poll();
-		assertTrue(resultObject instanceof StreamRecord);
-		StreamRecord<?> resultRecord = (StreamRecord<?>) resultObject;
-		assertTrue(resultRecord.getValue() instanceof Map);
+			Object resultObject = result.poll();
+			assertTrue(resultObject instanceof StreamRecord);
+			StreamRecord<?> resultRecord = (StreamRecord<?>) resultObject;
+			assertTrue(resultRecord.getValue() instanceof Map);
 
-		@SuppressWarnings("unchecked")
-		Map<String, Event> patternMap = (Map<String, Event>) resultRecord.getValue();
+			@SuppressWarnings("unchecked")
+			Map<String, List<Event>> patternMap =
+				(Map<String, List<Event>>) resultRecord.getValue();
 
-		assertEquals(startEvent, patternMap.get("start"));
-		assertEquals(middleEvent, patternMap.get("middle"));
-		assertEquals(endEvent, patternMap.get("end"));
+			assertEquals(startEvent, patternMap.get("start").get(0));
+			assertEquals(middleEvent, patternMap.get("middle").get(0));
+			assertEquals(endEvent, patternMap.get("end").get(0));
 
-		harness.close();
+			// and now go for a checkpoint with the new serializers
+
+			final Event startEvent1 = new Event(42, "start", 2.0);
+			final SubEvent middleEvent1 = new SubEvent(42, "foo", 1.0, 11.0);
+			final Event endEvent1 = new Event(42, "end", 2.0);
+
+			harness.processElement(new StreamRecord<Event>(startEvent1, 21));
+			harness.processElement(new StreamRecord<Event>(middleEvent1, 23));
+
+			// simulate snapshot/restore with some elements in internal sorting queue
+			OperatorStateHandles snapshot = harness.snapshot(1L, 1L);
+			harness.close();
+
+			harness = new KeyedOneInputStreamOperatorTestHarness<Byte, Event, Map<String, List<Event>>>(
+				CepOperatorTestUtilities.getKeyedCepOpearator(false, new NFAFactory(), ByteSerializer.INSTANCE),
+				keySelector,
+				BasicTypeInfo.BYTE_TYPE_INFO);
+
+			harness.setup();
+			harness.initializeState(snapshot);
+			harness.open();
+
+			harness.processElement(new StreamRecord<>(endEvent1, 25));
+
+			harness.processWatermark(new Watermark(50));
+
+			result = harness.getOutput();
+
+			// watermark and the result
+			assertEquals(2, result.size());
+
+			Object resultObject1 = result.poll();
+			assertTrue(resultObject1 instanceof StreamRecord);
+			StreamRecord<?> resultRecord1 = (StreamRecord<?>) resultObject1;
+			assertTrue(resultRecord1.getValue() instanceof Map);
+
+			@SuppressWarnings("unchecked")
+			Map<String, List<Event>> patternMap1 =
+				(Map<String, List<Event>>) resultRecord1.getValue();
+
+			assertEquals(startEvent1, patternMap1.get("start").get(0));
+			assertEquals(middleEvent1, patternMap1.get("middle").get(0));
+			assertEquals(endEvent1, patternMap1.get("end").get(0));
+		} finally {
+			harness.close();
+		}
 	}
 
 	private static class NFAFactory implements NFACompiler.NFAFactory<Event> {

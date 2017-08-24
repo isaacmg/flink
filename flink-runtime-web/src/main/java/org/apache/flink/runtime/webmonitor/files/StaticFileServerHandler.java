@@ -26,37 +26,35 @@ package org.apache.flink.runtime.webmonitor.files;
  * https://github.com/netty/netty/blob/4.0/example/src/main/java/io/netty/example/http/file/HttpStaticFileServerHandler.java
  *****************************************************************************/
 
-import io.netty.buffer.Unpooled;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
-import io.netty.channel.ChannelHandler;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.DefaultFileRegion;
-import io.netty.channel.SimpleChannelInboundHandler;
-import io.netty.handler.codec.http.DefaultFullHttpResponse;
-import io.netty.handler.codec.http.DefaultHttpResponse;
-import io.netty.handler.codec.http.FullHttpResponse;
-import io.netty.handler.codec.http.HttpChunkedInput;
-import io.netty.handler.codec.http.HttpHeaders;
-import io.netty.handler.codec.http.HttpRequest;
-import io.netty.handler.codec.http.HttpResponse;
-import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.LastHttpContent;
-import io.netty.handler.codec.http.router.KeepAliveWrite;
-import io.netty.handler.codec.http.router.Routed;
-import io.netty.handler.ssl.SslHandler;
-import io.netty.handler.stream.ChunkedFile;
-import io.netty.util.CharsetUtil;
-import org.apache.flink.runtime.instance.ActorGateway;
-import org.apache.flink.runtime.webmonitor.JobManagerRetriever;
+import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.webmonitor.handlers.HandlerRedirectUtils;
+import org.apache.flink.runtime.webmonitor.retriever.JobManagerRetriever;
+
+import org.apache.flink.shaded.netty4.io.netty.buffer.Unpooled;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelFuture;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelFutureListener;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.flink.shaded.netty4.io.netty.channel.DefaultFileRegion;
+import org.apache.flink.shaded.netty4.io.netty.channel.SimpleChannelInboundHandler;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.DefaultFullHttpResponse;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.DefaultHttpResponse;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.FullHttpResponse;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpChunkedInput;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpRequest;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponse;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.LastHttpContent;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.router.KeepAliveWrite;
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.router.Routed;
+import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SslHandler;
+import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedFile;
+import org.apache.flink.shaded.netty4.io.netty.util.CharsetUtil;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.Option;
-import scala.Tuple2;
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.FiniteDuration;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -73,20 +71,22 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.TimeZone;
+import java.util.concurrent.CompletableFuture;
 
-import static io.netty.handler.codec.http.HttpHeaders.Names.CACHE_CONTROL;
-import static io.netty.handler.codec.http.HttpHeaders.Names.CONNECTION;
-import static io.netty.handler.codec.http.HttpHeaders.Names.CONTENT_TYPE;
-import static io.netty.handler.codec.http.HttpHeaders.Names.DATE;
-import static io.netty.handler.codec.http.HttpHeaders.Names.EXPIRES;
-import static io.netty.handler.codec.http.HttpHeaders.Names.IF_MODIFIED_SINCE;
-import static io.netty.handler.codec.http.HttpHeaders.Names.LAST_MODIFIED;
-import static io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
-import static io.netty.handler.codec.http.HttpResponseStatus.NOT_FOUND;
-import static io.netty.handler.codec.http.HttpResponseStatus.NOT_MODIFIED;
-import static io.netty.handler.codec.http.HttpResponseStatus.OK;
-import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.CACHE_CONTROL;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.CONNECTION;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.CONTENT_TYPE;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.DATE;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.EXPIRES;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.IF_MODIFIED_SINCE;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpHeaders.Names.LAST_MODIFIED;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.NOT_FOUND;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.NOT_MODIFIED;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus.OK;
+import static org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -99,42 +99,41 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 @ChannelHandler.Sharable
 public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed> {
 
-	/** Default logger, if none is specified */
+	/** Default logger, if none is specified. */
 	private static final Logger DEFAULT_LOGGER = LoggerFactory.getLogger(StaticFileServerHandler.class);
 
-	/** Timezone in which this server answers its "if-modified" requests */
+	/** Timezone in which this server answers its "if-modified" requests. */
 	private static final TimeZone GMT_TIMEZONE = TimeZone.getTimeZone("GMT");
 
-	/** Date format for HTTP */
+	/** Date format for HTTP. */
 	public static final String HTTP_DATE_FORMAT = "EEE, dd MMM yyyy HH:mm:ss zzz";
 
-	/** Be default, we allow files to be cached for 5 minutes */
+	/** Be default, we allow files to be cached for 5 minutes. */
 	private static final int HTTP_CACHE_SECONDS = 300;
 
 	// ------------------------------------------------------------------------
 
-	/** JobManager retriever */
 	private final JobManagerRetriever retriever;
 
-	private final Future<String> localJobManagerAddressFuture;
+	private final CompletableFuture<String> localJobManagerAddressFuture;
 
-	private final FiniteDuration timeout;
+	private final Time timeout;
 
-	/** The path in which the static documents are */
+	/** The path in which the static documents are. */
 	private final File rootPath;
 
-	/** Whether the web service has https enabled */
+	/** Whether the web service has https enabled. */
 	private final boolean httpsEnabled;
 
-	/** The log for all error reporting */
+	/** The log for all error reporting. */
 	private final Logger logger;
 
 	private String localJobManagerAddress;
 
 	public StaticFileServerHandler(
 			JobManagerRetriever retriever,
-			Future<String> localJobManagerAddressPromise,
-			FiniteDuration timeout,
+			CompletableFuture<String> localJobManagerAddressPromise,
+			Time timeout,
 			File rootPath,
 			boolean httpsEnabled) throws IOException {
 
@@ -143,8 +142,8 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 
 	public StaticFileServerHandler(
 			JobManagerRetriever retriever,
-			Future<String> localJobManagerAddressFuture,
-			FiniteDuration timeout,
+			CompletableFuture<String> localJobManagerAddressFuture,
+			Time timeout,
 			File rootPath,
 			boolean httpsEnabled,
 			Logger logger) throws IOException {
@@ -163,9 +162,9 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 
 	@Override
 	public void channelRead0(ChannelHandlerContext ctx, Routed routed) throws Exception {
-		if (localJobManagerAddressFuture.isCompleted()) {
+		if (localJobManagerAddressFuture.isDone()) {
 			if (localJobManagerAddress == null) {
-				localJobManagerAddress = Await.result(localJobManagerAddressFuture, timeout);
+				localJobManagerAddress = localJobManagerAddressFuture.get();
 			}
 
 			final HttpRequest request = routed.request();
@@ -181,12 +180,12 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 				requestPath = "";
 			}
 
-			Option<Tuple2<ActorGateway, Integer>> jobManager = retriever.getJobManagerGatewayAndWebPort();
+			Optional<JobManagerGateway> optJobManagerGateway = retriever.getJobManagerGatewayNow();
 
-			if (jobManager.isDefined()) {
+			if (optJobManagerGateway.isPresent()) {
 				// Redirect to leader if necessary
 				String redirectAddress = HandlerRedirectUtils.getRedirectAddress(
-					localJobManagerAddress, jobManager.get());
+					localJobManagerAddress, optJobManagerGateway.get(), timeout);
 
 				if (redirectAddress != null) {
 					HttpResponse redirect = HandlerRedirectUtils.getRedirectResponse(
@@ -218,7 +217,7 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 			// file does not exist. Try to load it with the classloader
 			ClassLoader cl = StaticFileServerHandler.class.getClassLoader();
 
-			try(InputStream resourceStream = cl.getResourceAsStream("web" + requestPath)) {
+			try (InputStream resourceStream = cl.getResourceAsStream("web" + requestPath)) {
 				boolean success = false;
 				try {
 					if (resourceStream != null) {
@@ -282,7 +281,7 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 				return;
 			}
 		}
-		
+
 		if (logger.isDebugEnabled()) {
 			logger.debug("Responding with file '" + file.getAbsolutePath() + '\'');
 		}
@@ -296,37 +295,44 @@ public class StaticFileServerHandler extends SimpleChannelInboundHandler<Routed>
 			sendError(ctx, NOT_FOUND);
 			return;
 		}
-		long fileLength = raf.length();
 
-		HttpResponse response = new DefaultHttpResponse(HTTP_1_1, OK);
-		setContentTypeHeader(response, file);
+		try {
+			long fileLength = raf.length();
 
-		// since the log and out files are rapidly changing, we don't want to browser to cache them
-		if (!(requestPath.contains("log") || requestPath.contains("out"))) {
-			setDateAndCacheHeaders(response, file);
-		}
-		if (HttpHeaders.isKeepAlive(request)) {
-			response.headers().set(CONNECTION, HttpHeaders.Values.KEEP_ALIVE);
-		}
-		HttpHeaders.setContentLength(response, fileLength);
+			HttpResponse response = new DefaultHttpResponse(HTTP_1_1, OK);
+			setContentTypeHeader(response, file);
 
-		// write the initial line and the header.
-		ctx.write(response);
+			// since the log and out files are rapidly changing, we don't want to browser to cache them
+			if (!(requestPath.contains("log") || requestPath.contains("out"))) {
+				setDateAndCacheHeaders(response, file);
+			}
+			if (HttpHeaders.isKeepAlive(request)) {
+				response.headers().set(CONNECTION, HttpHeaders.Values.KEEP_ALIVE);
+			}
+			HttpHeaders.setContentLength(response, fileLength);
 
-		// write the content.
-		ChannelFuture lastContentFuture;
-		if (ctx.pipeline().get(SslHandler.class) == null) {
-			ctx.write(new DefaultFileRegion(raf.getChannel(), 0, fileLength), ctx.newProgressivePromise());
-			lastContentFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
-		} else {
-			lastContentFuture = ctx.writeAndFlush(new HttpChunkedInput(new ChunkedFile(raf, 0, fileLength, 8192)),
-				ctx.newProgressivePromise());
-			// HttpChunkedInput will write the end marker (LastHttpContent) for us.
-		}
+			// write the initial line and the header.
+			ctx.write(response);
 
-		// close the connection, if no keep-alive is needed
-		if (!HttpHeaders.isKeepAlive(request)) {
-			lastContentFuture.addListener(ChannelFutureListener.CLOSE);
+			// write the content.
+			ChannelFuture lastContentFuture;
+			if (ctx.pipeline().get(SslHandler.class) == null) {
+				ctx.write(new DefaultFileRegion(raf.getChannel(), 0, fileLength), ctx.newProgressivePromise());
+				lastContentFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
+			} else {
+				lastContentFuture = ctx.writeAndFlush(new HttpChunkedInput(new ChunkedFile(raf, 0, fileLength, 8192)),
+					ctx.newProgressivePromise());
+				// HttpChunkedInput will write the end marker (LastHttpContent) for us.
+			}
+
+			// close the connection, if no keep-alive is needed
+			if (!HttpHeaders.isKeepAlive(request)) {
+				lastContentFuture.addListener(ChannelFutureListener.CLOSE);
+			}
+		} catch (Exception e) {
+			raf.close();
+			logger.error("Failed to serve file.", e);
+			sendError(ctx, INTERNAL_SERVER_ERROR);
 		}
 	}
 

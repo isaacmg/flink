@@ -23,11 +23,11 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.runtime.blob.BlobCache;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.concurrent.Executors;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
 import org.apache.flink.runtime.execution.CancelTaskException;
@@ -53,17 +53,19 @@ import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.messages.TaskManagerMessages;
 import org.apache.flink.runtime.messages.TaskMessages;
+import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
-import org.apache.flink.runtime.util.EnvironmentInformation;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.WrappingRuntimeException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import scala.concurrent.duration.FiniteDuration;
 
+import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.URL;
@@ -71,6 +73,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -117,9 +120,9 @@ public class TaskTest extends TestLogger {
 	
 	@Before
 	public void createQueuesAndActors() {
-		taskManagerMessages = new LinkedBlockingQueue<Object>();
-		jobManagerMessages = new LinkedBlockingQueue<Object>();
-		listenerMessages = new LinkedBlockingQueue<Object>();
+		taskManagerMessages = new LinkedBlockingQueue<>();
+		jobManagerMessages = new LinkedBlockingQueue<>();
+		listenerMessages = new LinkedBlockingQueue<>();
 		taskManagerGateway = new ForwardingActorGateway(taskManagerMessages);
 		jobManagerGateway = new ForwardingActorGateway(jobManagerMessages);
 		listenerGateway = new ForwardingActorGateway(listenerMessages);
@@ -225,7 +228,8 @@ public class TaskTest extends TestLogger {
 	@Test
 	public void testLibraryCacheRegistrationFailed() {
 		try {
-			Task task = createTask(TestInvokableCorrect.class, mock(LibraryCacheManager.class));
+			Task task = createTask(TestInvokableCorrect.class, mock(BlobCache.class),
+				mock(LibraryCacheManager.class));
 
 			// task should be new and perfect
 			assertEquals(ExecutionState.CREATED, task.getExecutionState());
@@ -258,6 +262,7 @@ public class TaskTest extends TestLogger {
 	@Test
 	public void testExecutionFailsInNetworkRegistration() {
 		try {
+			BlobCache blobCache = mock(BlobCache.class);
 			// mock a working library cache
 			LibraryCacheManager libCache = mock(LibraryCacheManager.class);
 			when(libCache.getClassLoader(any(JobID.class))).thenReturn(getClass().getClassLoader());
@@ -272,7 +277,7 @@ public class TaskTest extends TestLogger {
 			when(network.getDefaultIOMode()).thenReturn(IOManager.IOMode.SYNC);
 			doThrow(new RuntimeException("buffers")).when(network).registerTask(any(Task.class));
 
-			Task task = createTask(TestInvokableCorrect.class, libCache, network, consumableNotifier, partitionProducerStateChecker, executor);
+			Task task = createTask(TestInvokableCorrect.class, blobCache, libCache, network, consumableNotifier, partitionProducerStateChecker, executor);
 
 			task.registerExecutionListener(listener);
 
@@ -327,6 +332,32 @@ public class TaskTest extends TestLogger {
 			validateTaskManagerStateChange(ExecutionState.RUNNING, task, false);
 			validateUnregisterTask(task.getExecutionId());
 			
+			validateListenerMessage(ExecutionState.RUNNING, task, false);
+			validateListenerMessage(ExecutionState.FAILED, task, true);
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+			fail(e.getMessage());
+		}
+	}
+
+	@Test
+	public void testFailWithWrappedException() {
+		try {
+			Task task = createTask(FailingInvokableWithChainedException.class);
+			task.registerExecutionListener(listener);
+
+			task.run();
+
+			assertEquals(ExecutionState.FAILED, task.getExecutionState());
+			assertTrue(task.isCanceledOrFailed());
+
+			Throwable cause = task.getFailureCause();
+			assertTrue(cause instanceof IOException);
+
+			validateTaskManagerStateChange(ExecutionState.RUNNING, task, false);
+			validateUnregisterTask(task.getExecutionId());
+
 			validateListenerMessage(ExecutionState.RUNNING, task, false);
 			validateListenerMessage(ExecutionState.FAILED, task, true);
 		}
@@ -589,6 +620,7 @@ public class TaskTest extends TestLogger {
 		IntermediateDataSetID resultId = new IntermediateDataSetID();
 		ResultPartitionID partitionId = new ResultPartitionID();
 
+		BlobCache blobCache = mock(BlobCache.class);
 		LibraryCacheManager libCache = mock(LibraryCacheManager.class);
 		when(libCache.getClassLoader(any(JobID.class))).thenReturn(getClass().getClassLoader());
 
@@ -601,7 +633,7 @@ public class TaskTest extends TestLogger {
 		when(network.createKvStateTaskRegistry(any(JobID.class), any(JobVertexID.class)))
 			.thenReturn(mock(TaskKvStateRegistry.class));
 
-		createTask(InvokableBlockingInInvoke.class, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
+		createTask(InvokableBlockingInInvoke.class, blobCache, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
 
 		// Test all branches of trigger partition state check
 
@@ -610,9 +642,9 @@ public class TaskTest extends TestLogger {
 			createQueuesAndActors();
 
 			// PartitionProducerDisposedException
-			Task task = createTask(InvokableBlockingInInvoke.class, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
+			Task task = createTask(InvokableBlockingInInvoke.class, blobCache, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
 
-			FlinkCompletableFuture<ExecutionState> promise = new FlinkCompletableFuture<>();
+			CompletableFuture<ExecutionState> promise = new CompletableFuture<>();
 			when(partitionChecker.requestPartitionProducerState(eq(task.getJobID()), eq(resultId), eq(partitionId))).thenReturn(promise);
 
 			task.triggerPartitionProducerStateCheck(task.getJobID(), resultId, partitionId);
@@ -626,9 +658,9 @@ public class TaskTest extends TestLogger {
 			createQueuesAndActors();
 
 			// Any other exception
-			Task task = createTask(InvokableBlockingInInvoke.class, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
+			Task task = createTask(InvokableBlockingInInvoke.class, blobCache, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
 
-			FlinkCompletableFuture<ExecutionState> promise = new FlinkCompletableFuture<>();
+			CompletableFuture<ExecutionState> promise = new CompletableFuture<>();
 			when(partitionChecker.requestPartitionProducerState(eq(task.getJobID()), eq(resultId), eq(partitionId))).thenReturn(promise);
 
 			task.triggerPartitionProducerStateCheck(task.getJobID(), resultId, partitionId);
@@ -643,7 +675,7 @@ public class TaskTest extends TestLogger {
 			createQueuesAndActors();
 
 			// TimeoutException handled special => retry
-			Task task = createTask(InvokableBlockingInInvoke.class, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
+			Task task = createTask(InvokableBlockingInInvoke.class, blobCache, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
 			SingleInputGate inputGate = mock(SingleInputGate.class);
 			when(inputGate.getConsumedResultId()).thenReturn(resultId);
 
@@ -653,7 +685,7 @@ public class TaskTest extends TestLogger {
 
 				setInputGate(task, inputGate);
 
-				FlinkCompletableFuture<ExecutionState> promise = new FlinkCompletableFuture<>();
+				CompletableFuture<ExecutionState> promise = new CompletableFuture<>();
 				when(partitionChecker.requestPartitionProducerState(eq(task.getJobID()), eq(resultId), eq(partitionId))).thenReturn(promise);
 
 				task.triggerPartitionProducerStateCheck(task.getJobID(), resultId, partitionId);
@@ -674,7 +706,7 @@ public class TaskTest extends TestLogger {
 			createQueuesAndActors();
 
 			// Success
-			Task task = createTask(InvokableBlockingInInvoke.class, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
+			Task task = createTask(InvokableBlockingInInvoke.class, blobCache, libCache, network, consumableNotifier, partitionChecker, Executors.directExecutor());
 			SingleInputGate inputGate = mock(SingleInputGate.class);
 			when(inputGate.getConsumedResultId()).thenReturn(resultId);
 
@@ -684,7 +716,7 @@ public class TaskTest extends TestLogger {
 
 				setInputGate(task, inputGate);
 
-				FlinkCompletableFuture<ExecutionState> promise = new FlinkCompletableFuture<>();
+				CompletableFuture<ExecutionState> promise = new CompletableFuture<>();
 				when(partitionChecker.requestPartitionProducerState(eq(task.getJobID()), eq(resultId), eq(partitionId))).thenReturn(promise);
 
 				task.triggerPartitionProducerStateCheck(task.getJobID(), resultId, partitionId);
@@ -854,26 +886,30 @@ public class TaskTest extends TestLogger {
 	}
 
 	private Task createTask(Class<? extends AbstractInvokable> invokable, Configuration config) throws IOException {
+		BlobCache blobCache = mock(BlobCache.class);
 		LibraryCacheManager libCache = mock(LibraryCacheManager.class);
 		when(libCache.getClassLoader(any(JobID.class))).thenReturn(getClass().getClassLoader());
-		return createTask(invokable, libCache, config, new ExecutionConfig());
+		return createTask(invokable, blobCache,libCache, config, new ExecutionConfig());
 	}
 
 	private Task createTask(Class<? extends AbstractInvokable> invokable, Configuration config, ExecutionConfig execConfig) throws IOException {
+		BlobCache blobCache = mock(BlobCache.class);
 		LibraryCacheManager libCache = mock(LibraryCacheManager.class);
 		when(libCache.getClassLoader(any(JobID.class))).thenReturn(getClass().getClassLoader());
-		return createTask(invokable, libCache, config, execConfig);
+		return createTask(invokable, blobCache,libCache, config, execConfig);
 	}
 
 	private Task createTask(
 			Class<? extends AbstractInvokable> invokable,
+			BlobCache blobCache,
 			LibraryCacheManager libCache) throws IOException {
 
-		return createTask(invokable, libCache, new Configuration(), new ExecutionConfig());
+		return createTask(invokable, blobCache,libCache, new Configuration(), new ExecutionConfig());
 	}
 
 	private Task createTask(
 			Class<? extends AbstractInvokable> invokable,
+			BlobCache blobCache,
 			LibraryCacheManager libCache,
 			Configuration config,
 			ExecutionConfig execConfig) throws IOException {
@@ -888,21 +924,23 @@ public class TaskTest extends TestLogger {
 		when(network.createKvStateTaskRegistry(any(JobID.class), any(JobVertexID.class)))
 				.thenReturn(mock(TaskKvStateRegistry.class));
 
-		return createTask(invokable, libCache, network, consumableNotifier, partitionProducerStateChecker, executor, config, execConfig);
+		return createTask(invokable, blobCache, libCache, network, consumableNotifier, partitionProducerStateChecker, executor, config, execConfig);
 	}
 
 	private Task createTask(
 			Class<? extends AbstractInvokable> invokable,
+			BlobCache blobCache,
 			LibraryCacheManager libCache,
 			NetworkEnvironment networkEnvironment,
 			ResultPartitionConsumableNotifier consumableNotifier,
 			PartitionProducerStateChecker partitionProducerStateChecker,
 			Executor executor) throws IOException {
-		return createTask(invokable, libCache, networkEnvironment, consumableNotifier, partitionProducerStateChecker, executor, new Configuration(), new ExecutionConfig());
+		return createTask(invokable, blobCache, libCache, networkEnvironment, consumableNotifier, partitionProducerStateChecker, executor, new Configuration(), new ExecutionConfig());
 	}
 	
 	private Task createTask(
 		Class<? extends AbstractInvokable> invokable,
+		BlobCache blobCache,
 		LibraryCacheManager libCache,
 		NetworkEnvironment networkEnvironment,
 		ResultPartitionConsumableNotifier consumableNotifier,
@@ -941,6 +979,9 @@ public class TaskTest extends TestLogger {
 			1,
 			invokable.getName(),
 			new Configuration());
+
+		TaskMetricGroup taskMetricGroup = mock(TaskMetricGroup.class);
+		when(taskMetricGroup.getIOMetricGroup()).thenReturn(mock(TaskIOMetricGroup.class));
 		
 		return new Task(
 			jobInformation,
@@ -960,10 +1001,11 @@ public class TaskTest extends TestLogger {
 			taskManagerConnection,
 			inputSplitProvider,
 			checkpointResponder,
+			blobCache,
 			libCache,
 			mock(FileCache.class),
 			new TestingTaskManagerRuntimeInfo(taskManagerConfig),
-			mock(TaskMetricGroup.class),
+			taskMetricGroup,
 			consumableNotifier,
 			partitionProducerStateChecker,
 			executor);
@@ -1227,6 +1269,29 @@ public class TaskTest extends TestLogger {
 
 		@Override
 		public void cancel() throws Exception {
+		}
+	}
+
+	public static final class FailingInvokableWithChainedException extends AbstractInvokable {
+
+		@Override
+		public void invoke() throws Exception {
+			throw new TestWrappedException(new IOException("test"));
+		}
+
+		@Override
+		public void cancel() {}
+	}
+
+	// ------------------------------------------------------------------------
+	//  test exceptions
+	// ------------------------------------------------------------------------
+
+	private static class TestWrappedException extends WrappingRuntimeException {
+		private static final long serialVersionUID = 1L;
+
+		public TestWrappedException(@Nonnull Throwable cause) {
+			super(cause);
 		}
 	}
 }

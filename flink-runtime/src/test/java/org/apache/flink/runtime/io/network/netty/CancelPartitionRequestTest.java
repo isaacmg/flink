@@ -18,11 +18,9 @@
 
 package org.apache.flink.runtime.io.network.netty;
 
-import io.netty.channel.Channel;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.io.network.buffer.BufferProvider;
-import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
 import org.apache.flink.runtime.io.network.netty.NettyTestUtil.NettyServerAndClient;
 import org.apache.flink.runtime.io.network.partition.BufferAvailabilityListener;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
@@ -31,6 +29,9 @@ import org.apache.flink.runtime.io.network.partition.ResultSubpartitionView;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannelID;
 import org.apache.flink.runtime.io.network.util.TestPooledBufferProvider;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
+
+import org.apache.flink.shaded.netty4.io.netty.channel.Channel;
+
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -78,18 +79,18 @@ public class CancelPartitionRequestTest {
 			final ResultSubpartitionView view = spy(new InfiniteSubpartitionView(outboundBuffers, sync));
 
 			// Return infinite subpartition
-			when(partitions.createSubpartitionView(eq(pid), eq(0), any(BufferProvider.class), any(BufferAvailabilityListener.class)))
+			when(partitions.createSubpartitionView(eq(pid), eq(0), any(BufferAvailabilityListener.class)))
 				.thenAnswer(new Answer<ResultSubpartitionView>() {
 					@Override
 					public ResultSubpartitionView answer(InvocationOnMock invocationOnMock) throws Throwable {
-						BufferAvailabilityListener listener = (BufferAvailabilityListener) invocationOnMock.getArguments()[3];
+						BufferAvailabilityListener listener = (BufferAvailabilityListener) invocationOnMock.getArguments()[2];
 						listener.notifyBuffersAvailable(Long.MAX_VALUE);
 						return view;
 					}
 				});
 
 			PartitionRequestProtocol protocol = new PartitionRequestProtocol(
-					partitions, mock(TaskEventDispatcher.class), mock(NetworkBufferPool.class));
+					partitions, mock(TaskEventDispatcher.class));
 
 			serverAndClient = initServerAndClient(protocol);
 
@@ -129,18 +130,18 @@ public class CancelPartitionRequestTest {
 			final ResultSubpartitionView view = spy(new InfiniteSubpartitionView(outboundBuffers, sync));
 
 			// Return infinite subpartition
-			when(partitions.createSubpartitionView(eq(pid), eq(0), any(BufferProvider.class), any(BufferAvailabilityListener.class)))
+			when(partitions.createSubpartitionView(eq(pid), eq(0), any(BufferAvailabilityListener.class)))
 					.thenAnswer(new Answer<ResultSubpartitionView>() {
 						@Override
 						public ResultSubpartitionView answer(InvocationOnMock invocationOnMock) throws Throwable {
-							BufferAvailabilityListener listener = (BufferAvailabilityListener) invocationOnMock.getArguments()[3];
+							BufferAvailabilityListener listener = (BufferAvailabilityListener) invocationOnMock.getArguments()[2];
 							listener.notifyBuffersAvailable(Long.MAX_VALUE);
 							return view;
 						}
 					});
 
 			PartitionRequestProtocol protocol = new PartitionRequestProtocol(
-					partitions, mock(TaskEventDispatcher.class), mock(NetworkBufferPool.class));
+					partitions, mock(TaskEventDispatcher.class));
 
 			serverAndClient = initServerAndClient(protocol);
 

@@ -18,12 +18,14 @@
 
 package org.apache.flink.runtime.blob;
 
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.TestLogger;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -32,15 +34,21 @@ import java.net.ServerSocket;
  * Tests to ensure that the BlobServer properly starts on a specified range of available ports.
  */
 public class BlobServerRangeTest extends TestLogger {
+
+	@Rule
+	public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
 	/**
 	 * Start blob server on 0 = pick an ephemeral port
 	 */
 	@Test
 	public void testOnEphemeralPort() throws IOException {
 		Configuration conf = new Configuration();
-		conf.setString(ConfigConstants.BLOB_SERVER_PORT, "0");
-		BlobServer srv = new BlobServer(conf);
-		srv.shutdown();
+		conf.setString(BlobServerOptions.PORT, "0");
+		conf.setString(BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
+
+		BlobServer srv = new BlobServer(conf, new VoidBlobStore());
+		srv.close();
 	}
 
 	/**
@@ -59,11 +67,12 @@ public class BlobServerRangeTest extends TestLogger {
 		}
 
 		Configuration conf = new Configuration();
-		conf.setString(ConfigConstants.BLOB_SERVER_PORT, String.valueOf(socket.getLocalPort()));
+		conf.setString(BlobServerOptions.PORT, String.valueOf(socket.getLocalPort()));
+		conf.setString(BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
 
 		// this thing is going to throw an exception
 		try {
-			BlobServer srv = new BlobServer(conf);
+			BlobServer srv = new BlobServer(conf, new VoidBlobStore());
 		} finally {
 			socket.close();
 		}
@@ -88,13 +97,14 @@ public class BlobServerRangeTest extends TestLogger {
 		}
 		int availablePort = NetUtils.getAvailablePort();
 		Configuration conf = new Configuration();
-		conf.setString(ConfigConstants.BLOB_SERVER_PORT, sockets[0].getLocalPort() + "," + sockets[1].getLocalPort() + "," + availablePort);
+		conf.setString(BlobServerOptions.PORT, sockets[0].getLocalPort() + "," + sockets[1].getLocalPort() + "," + availablePort);
+		conf.setString(BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
 
 		// this thing is going to throw an exception
 		try {
-			BlobServer srv = new BlobServer(conf);
+			BlobServer srv = new BlobServer(conf, new VoidBlobStore());
 			Assert.assertEquals(availablePort, srv.getPort());
-			srv.shutdown();
+			srv.close();
 		} finally {
 			sockets[0].close();
 			sockets[1].close();

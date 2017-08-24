@@ -93,6 +93,11 @@ public class KeyGroupsStateHandle implements StreamStateHandle, KeyedStateHandle
 	}
 
 	@Override
+	public void registerSharedStates(SharedStateRegistry stateRegistry) {
+		// No shared states
+	}
+
+	@Override
 	public void discardState() throws Exception {
 		stateHandle.discardState();
 	}
@@ -136,7 +141,7 @@ public class KeyGroupsStateHandle implements StreamStateHandle, KeyedStateHandle
 	public String toString() {
 		return "KeyGroupsStateHandle{" +
 				"groupRangeOffsets=" + groupRangeOffsets +
-				", data=" + stateHandle +
+				", stateHandle=" + stateHandle +
 				'}';
 	}
 }

@@ -32,54 +32,50 @@ import org.apache.flink.graph.ReduceNeighborsFunction;
 import org.apache.flink.graph.Vertex;
 import org.apache.flink.graph.test.TestGraphUtils;
 import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
+import org.apache.flink.test.util.TestEnvironment;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.TestLogger;
+
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.junit.Assert.fail;
 
-public class ReduceOnNeighborsWithExceptionITCase {
+/**
+ * Test expected exceptions for {@link Graph#groupReduceOnNeighbors} and {@link Graph#reduceOnNeighbors}.
+ */
+public class ReduceOnNeighborsWithExceptionITCase extends TestLogger {
 
 	private static final int PARALLELISM = 4;
 
 	private static LocalFlinkMiniCluster cluster;
 
-
 	@BeforeClass
 	public static void setupCluster() {
-		try {
-			Configuration config = new Configuration();
-			config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, PARALLELISM);
-			cluster = new LocalFlinkMiniCluster(config, false);
-			cluster.start();
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail("Error starting test cluster: " + e.getMessage());
-		}
+		Configuration config = new Configuration();
+		config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, PARALLELISM);
+		cluster = new LocalFlinkMiniCluster(config, false);
+		cluster.start();
+
+		TestEnvironment.setAsContext(cluster, PARALLELISM);
 	}
 
 	@AfterClass
 	public static void tearDownCluster() {
-		try {
-			cluster.stop();
-		}
-		catch (Throwable t) {
-			t.printStackTrace();
-			fail("ClusterClient shutdown caused an exception: " + t.getMessage());
-		}
+		cluster.stop();
+
+		TestEnvironment.unsetAsContext();
 	}
 
 	/**
 	 * Test groupReduceOnNeighbors() -NeighborsFunctionWithVertexValue-
-	 * with an edge having a srcId that does not exist in the vertex DataSet
+	 * with an edge having a srcId that does not exist in the vertex DataSet.
 	 */
 	@Test
 	public void testGroupReduceOnNeighborsWithVVInvalidEdgeSrcId() throws Exception {
 
-		final ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(PARALLELISM);
 		env.getConfig().disableSysoutLogging();
 
@@ -90,8 +86,10 @@ public class ReduceOnNeighborsWithExceptionITCase {
 			DataSet<Tuple2<Long, Long>> verticesWithSumOfOutNeighborValues =
 					graph.groupReduceOnNeighbors(new SumAllNeighbors(), EdgeDirection.ALL);
 
-			verticesWithSumOfOutNeighborValues.output(new DiscardingOutputFormat<Tuple2<Long, Long>>());
+			verticesWithSumOfOutNeighborValues.output(new DiscardingOutputFormat<>());
 			env.execute();
+
+			fail("Expected an exception.");
 		} catch (Exception e) {
 			// We expect the job to fail with an exception
 		}
@@ -99,13 +97,12 @@ public class ReduceOnNeighborsWithExceptionITCase {
 
 	/**
 	 * Test groupReduceOnNeighbors() -NeighborsFunctionWithVertexValue-
-	 * with an edge having a trgId that does not exist in the vertex DataSet
+	 * with an edge having a trgId that does not exist in the vertex DataSet.
 	 */
 	@Test
 	public void testGroupReduceOnNeighborsWithVVInvalidEdgeTrgId() throws Exception {
 
-		final ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(PARALLELISM);
 		env.getConfig().disableSysoutLogging();
 
@@ -116,8 +113,10 @@ public class ReduceOnNeighborsWithExceptionITCase {
 			DataSet<Tuple2<Long, Long>> verticesWithSumOfOutNeighborValues =
 					graph.groupReduceOnNeighbors(new SumAllNeighbors(), EdgeDirection.ALL);
 
-			verticesWithSumOfOutNeighborValues.output(new DiscardingOutputFormat<Tuple2<Long, Long>>());
+			verticesWithSumOfOutNeighborValues.output(new DiscardingOutputFormat<>());
 			env.execute();
+
+			fail("Expected an exception.");
 		} catch (Exception e) {
 			// We expect the job to fail with an exception
 		}
@@ -125,13 +124,12 @@ public class ReduceOnNeighborsWithExceptionITCase {
 
 	/**
 	 * Test groupReduceOnNeighbors() -NeighborsFunction-
-	 * with an edge having a srcId that does not exist in the vertex DataSet
+	 * with an edge having a srcId that does not exist in the vertex DataSet.
 	 */
 	@Test
 	public void testGroupReduceOnNeighborsInvalidEdgeSrcId() throws Exception {
 
-		final ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(PARALLELISM);
 		env.getConfig().disableSysoutLogging();
 
@@ -142,7 +140,7 @@ public class ReduceOnNeighborsWithExceptionITCase {
 			DataSet<Tuple2<Long, Long>> verticesWithSumOfAllNeighborValues =
 					graph.reduceOnNeighbors(new SumNeighbors(), EdgeDirection.ALL);
 
-			verticesWithSumOfAllNeighborValues.output(new DiscardingOutputFormat<Tuple2<Long, Long>>());
+			verticesWithSumOfAllNeighborValues.output(new DiscardingOutputFormat<>());
 			env.execute();
 		} catch (Exception e) {
 			// We expect the job to fail with an exception
@@ -151,13 +149,12 @@ public class ReduceOnNeighborsWithExceptionITCase {
 
 	/**
 	 * Test groupReduceOnNeighbors() -NeighborsFunction-
-	 * with an edge having a trgId that does not exist in the vertex DataSet
+	 * with an edge having a trgId that does not exist in the vertex DataSet.
 	 */
 	@Test
 	public void testGroupReduceOnNeighborsInvalidEdgeTrgId() throws Exception {
 
-		final ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(PARALLELISM);
 		env.getConfig().disableSysoutLogging();
 
@@ -168,7 +165,7 @@ public class ReduceOnNeighborsWithExceptionITCase {
 			DataSet<Tuple2<Long, Long>> verticesWithSumOfAllNeighborValues =
 					graph.reduceOnNeighbors(new SumNeighbors(), EdgeDirection.ALL);
 
-			verticesWithSumOfAllNeighborValues.output(new DiscardingOutputFormat<Tuple2<Long, Long>>());
+			verticesWithSumOfAllNeighborValues.output(new DiscardingOutputFormat<>());
 			env.execute();
 		} catch (Exception e) {
 			// We expect the job to fail with an exception
@@ -181,8 +178,8 @@ public class ReduceOnNeighborsWithExceptionITCase {
 
 		@Override
 		public void iterateNeighbors(Vertex<Long, Long> vertex,
-									 Iterable<Tuple2<Edge<Long, Long>, Vertex<Long, Long>>> neighbors,
-									 Collector<Tuple2<Long, Long>> out) throws Exception {
+				Iterable<Tuple2<Edge<Long, Long>, Vertex<Long, Long>>> neighbors,
+				Collector<Tuple2<Long, Long>> out) throws Exception {
 
 			long sum = 0;
 			for (Tuple2<Edge<Long, Long>, Vertex<Long, Long>> neighbor : neighbors) {

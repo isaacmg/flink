@@ -15,63 +15,63 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.metrics;
 
-import akka.actor.ActorRef;
-import akka.actor.ActorSystem;
-import akka.dispatch.OnFailure;
-import akka.dispatch.OnSuccess;
-import akka.pattern.Patterns;
-import akka.util.Timeout;
-import org.apache.flink.configuration.ConfigConstants;
-import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.instance.Instance;
-import org.apache.flink.runtime.messages.JobManagerMessages;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
 import org.apache.flink.runtime.messages.webmonitor.MultipleJobsDetails;
-import org.apache.flink.runtime.messages.webmonitor.RequestJobDetails;
+import org.apache.flink.runtime.metrics.dump.MetricDump;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization;
 import org.apache.flink.runtime.metrics.dump.MetricQueryService;
-import org.apache.flink.runtime.metrics.dump.MetricDump;
-import org.apache.flink.runtime.webmonitor.JobManagerRetriever;
+import org.apache.flink.runtime.webmonitor.retriever.JobManagerRetriever;
+import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceGateway;
+import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceRetriever;
 import org.apache.flink.util.Preconditions;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.Option;
-import scala.concurrent.ExecutionContext;
-import scala.concurrent.Future;
-import scala.concurrent.duration.Duration;
-import scala.concurrent.duration.FiniteDuration;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricDumpDeserializer;
 
 /**
  * The MetricFetcher can be used to fetch metrics from the JobManager and all registered TaskManagers.
  *
- * Metrics will only be fetched when {@link MetricFetcher#update()} is called, provided that a sufficient time since
+ * <p>Metrics will only be fetched when {@link MetricFetcher#update()} is called, provided that a sufficient time since
  * the last call has passed.
  */
 public class MetricFetcher {
 	private static final Logger LOG = LoggerFactory.getLogger(MetricFetcher.class);
 
-	private final ActorSystem actorSystem;
 	private final JobManagerRetriever retriever;
-	private final ExecutionContext ctx;
-	private final FiniteDuration timeout = new FiniteDuration(Duration.create(ConfigConstants.DEFAULT_AKKA_ASK_TIMEOUT).toMillis(), TimeUnit.MILLISECONDS);
+	private final MetricQueryServiceRetriever queryServiceRetriever;
+	private final Executor executor;
+	private final Time timeout;
 
-	private MetricStore metrics = new MetricStore();
-	private MetricDumpDeserializer deserializer = new MetricDumpDeserializer();
+	private final MetricStore metrics = new MetricStore();
+	private final MetricDumpDeserializer deserializer = new MetricDumpDeserializer();
 
 	private long lastUpdateTime;
 
-	public MetricFetcher(ActorSystem actorSystem, JobManagerRetriever retriever, ExecutionContext ctx) {
-		this.actorSystem = Preconditions.checkNotNull(actorSystem);
+	public MetricFetcher(
+			JobManagerRetriever retriever,
+			MetricQueryServiceRetriever queryServiceRetriever,
+			Executor executor,
+			Time timeout) {
 		this.retriever = Preconditions.checkNotNull(retriever);
-		this.ctx = Preconditions.checkNotNull(ctx);
+		this.queryServiceRetriever = Preconditions.checkNotNull(queryServiceRetriever);
+		this.executor = Preconditions.checkNotNull(executor);
+		this.timeout = Preconditions.checkNotNull(timeout);
 	}
 
 	/**
@@ -98,127 +98,114 @@ public class MetricFetcher {
 
 	private void fetchMetrics() {
 		try {
-			Option<scala.Tuple2<ActorGateway, Integer>> jobManagerGatewayAndWebPort = retriever.getJobManagerGatewayAndWebPort();
-			if (jobManagerGatewayAndWebPort.isDefined()) {
-				ActorGateway jobManager = jobManagerGatewayAndWebPort.get()._1();
+			Optional<JobManagerGateway> optJobManagerGateway = retriever.getJobManagerGatewayNow();
+			if (optJobManagerGateway.isPresent()) {
+				final JobManagerGateway jobManagerGateway = optJobManagerGateway.get();
 
 				/**
 				 * Remove all metrics that belong to a job that is not running and no longer archived.
 				 */
-				Future<Object> jobDetailsFuture = jobManager.ask(new RequestJobDetails(true, true), timeout);
-				jobDetailsFuture
-					.onSuccess(new OnSuccess<Object>() {
-						@Override
-						public void onSuccess(Object result) throws Throwable {
-							MultipleJobsDetails details = (MultipleJobsDetails) result;
+				CompletableFuture<MultipleJobsDetails> jobDetailsFuture = jobManagerGateway.requestJobDetails(true, true, timeout);
+
+				jobDetailsFuture.whenCompleteAsync(
+					(MultipleJobsDetails jobDetails, Throwable throwable) -> {
+						if (throwable != null) {
+							LOG.debug("Fetching of JobDetails failed.", throwable);
+						} else {
 							ArrayList<String> toRetain = new ArrayList<>();
-							for (JobDetails job : details.getRunningJobs()) {
+							for (JobDetails job : jobDetails.getRunningJobs()) {
 								toRetain.add(job.getJobId().toString());
 							}
-							for (JobDetails job : details.getFinishedJobs()) {
+							for (JobDetails job : jobDetails.getFinishedJobs()) {
 								toRetain.add(job.getJobId().toString());
 							}
 							synchronized (metrics) {
 								metrics.jobs.keySet().retainAll(toRetain);
 							}
 						}
-					}, ctx);
-				logErrorOnFailure(jobDetailsFuture, "Fetching of JobDetails failed.");
+					},
+					executor);
 
-				String jobManagerPath = jobManager.path();
-				String queryServicePath = jobManagerPath.substring(0, jobManagerPath.lastIndexOf('/') + 1) + MetricQueryService.METRIC_QUERY_SERVICE_NAME;
-				ActorRef jobManagerQueryService = actorSystem.actorFor(queryServicePath);
+				String jobManagerPath = jobManagerGateway.getAddress();
+				String jmQueryServicePath = jobManagerPath.substring(0, jobManagerPath.lastIndexOf('/') + 1) + MetricQueryService.METRIC_QUERY_SERVICE_NAME;
 
-				queryMetrics(jobManagerQueryService);
+				retrieveAndQueryMetrics(jmQueryServicePath);
 
 				/**
 				 * We first request the list of all registered task managers from the job manager, and then
 				 * request the respective metric dump from each task manager.
 				 *
-				 * All stored metrics that do not belong to a registered task manager will be removed.
+				 * <p>All stored metrics that do not belong to a registered task manager will be removed.
 				 */
-				Future<Object> registeredTaskManagersFuture = jobManager.ask(JobManagerMessages.getRequestRegisteredTaskManagers(), timeout);
-				registeredTaskManagersFuture
-					.onSuccess(new OnSuccess<Object>() {
-						@Override
-						public void onSuccess(Object result) throws Throwable {
-							Iterable<Instance> taskManagers = ((JobManagerMessages.RegisteredTaskManagers) result).asJavaIterable();
-							List<String> activeTaskManagers = new ArrayList<>();
-							for (Instance taskManager : taskManagers) {
-								activeTaskManagers.add(taskManager.getId().toString());
+				CompletableFuture<Collection<Instance>> taskManagersFuture = jobManagerGateway.requestTaskManagerInstances(timeout);
 
-								String taskManagerPath = taskManager.getTaskManagerGateway().getAddress();
-								String queryServicePath = taskManagerPath.substring(0, taskManagerPath.lastIndexOf('/') + 1) + MetricQueryService.METRIC_QUERY_SERVICE_NAME + "_" + taskManager.getTaskManagerID().getResourceIdString();
-								ActorRef taskManagerQueryService = actorSystem.actorFor(queryServicePath);
+				taskManagersFuture.whenCompleteAsync(
+					(Collection<Instance> taskManagers, Throwable throwable) -> {
+						if (throwable != null) {
+							LOG.debug("Fetching list of registered TaskManagers failed.", throwable);
+						} else {
+							List<String> activeTaskManagers = taskManagers.stream().map(
+								taskManagerInstance -> {
+									final String taskManagerAddress = taskManagerInstance.getTaskManagerGateway().getAddress();
+									final String tmQueryServicePath = taskManagerAddress.substring(0, taskManagerAddress.lastIndexOf('/') + 1) + MetricQueryService.METRIC_QUERY_SERVICE_NAME + "_" + taskManagerInstance.getTaskManagerID().getResourceIdString();
 
-								queryMetrics(taskManagerQueryService);
-							}
-							synchronized (metrics) { // remove all metrics belonging to unregistered task managers
+									retrieveAndQueryMetrics(tmQueryServicePath);
+
+									return taskManagerInstance.getId().toString();
+								}).collect(Collectors.toList());
+
+							synchronized (metrics) {
 								metrics.taskManagers.keySet().retainAll(activeTaskManagers);
 							}
 						}
-					}, ctx);
-				logErrorOnFailure(registeredTaskManagersFuture, "Fetchin list of registered TaskManagers failed.");
+					},
+					executor);
 			}
 		} catch (Exception e) {
 			LOG.warn("Exception while fetching metrics.", e);
 		}
 	}
 
-	private void logErrorOnFailure(Future<Object> future, final String message) {
-		future.onFailure(new OnFailure() {
-			@Override
-			public void onFailure(Throwable failure) throws Throwable {
-				LOG.warn(message, failure);
-			}
-		}, ctx);
-	}
-
 	/**
-	 * Requests a metric dump from the given actor.
+	 * Retrieves and queries the specified QueryServiceGateway.
 	 *
-	 * @param actor ActorRef to request the dump from
-     */
-	private void queryMetrics(ActorRef actor) {
-		Future<Object> metricQueryFuture = new BasicGateway(actor).ask(MetricQueryService.getCreateDump(), timeout);
-		metricQueryFuture
-			.onSuccess(new OnSuccess<Object>() {
-				@Override
-				public void onSuccess(Object result) throws Throwable {
-					addMetrics(result);
-				}
-			}, ctx);
-		logErrorOnFailure(metricQueryFuture, "Fetching metrics failed.");
-	}
+	 * @param queryServicePath specifying the QueryServiceGateway
+	 */
+	private void retrieveAndQueryMetrics(String queryServicePath) {
+		final CompletableFuture<MetricQueryServiceGateway> queryServiceGatewayFuture = queryServiceRetriever.retrieveService(queryServicePath);
 
-	private void addMetrics(Object result) {
-		MetricDumpSerialization.MetricSerializationResult data = (MetricDumpSerialization.MetricSerializationResult) result;
-		List<MetricDump> dumpedMetrics = deserializer.deserialize(data);
-		for (MetricDump metric : dumpedMetrics) {
-			metrics.add(metric);
-		}
+		queryServiceGatewayFuture.whenCompleteAsync(
+			(MetricQueryServiceGateway queryServiceGateway, Throwable t) -> {
+				if (t != null) {
+					LOG.debug("Could not retrieve QueryServiceGateway.", t);
+				} else {
+					queryMetrics(queryServiceGateway);
+				}
+			},
+			executor);
 	}
 
 	/**
-	 * Helper class that allows mocking of the answer.
-     */
-	static class BasicGateway {
-		private final ActorRef actor;
-
-		private BasicGateway(ActorRef actor) {
-			this.actor = actor;
-		}
-
-		/**
-		 * Sends a message asynchronously and returns its response. The response to the message is
-		 * returned as a future.
-		 *
-		 * @param message Message to be sent
-		 * @param timeout Timeout until the Future is completed with an AskTimeoutException
-		 * @return Future which contains the response to the sent message
-		 */
-		public Future<Object> ask(Object message, FiniteDuration timeout) {
-			return Patterns.ask(actor, message, new Timeout(timeout));
-		}
+	 * Query the metrics from the given QueryServiceGateway.
+	 *
+	 * @param queryServiceGateway to query for metrics
+	 */
+	private void queryMetrics(final MetricQueryServiceGateway queryServiceGateway) {
+		queryServiceGateway
+			.queryMetrics(timeout)
+			.whenCompleteAsync(
+				(MetricDumpSerialization.MetricSerializationResult result, Throwable t) -> {
+					if (t != null) {
+						LOG.debug("Fetching metrics failed.", t);
+					} else {
+						List<MetricDump> dumpedMetrics = deserializer.deserialize(result);
+						synchronized (metrics) {
+							for (MetricDump metric : dumpedMetrics) {
+								metrics.add(metric);
+							}
+						}
+					}
+				},
+				executor);
 	}
 }

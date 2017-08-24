@@ -32,7 +32,12 @@ import org.apache.flink.types.NullValue;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.LongValueSequenceIterator;
 
+/**
+ * Utilities for graph generators.
+ */
 public class GraphGeneratorUtils {
+
+	private GraphGeneratorUtils() {}
 
 	/**
 	 * Generates {@link Vertex Vertices} with sequential, numerical labels.
@@ -43,7 +48,7 @@ public class GraphGeneratorUtils {
 	 * @return {@link DataSet} of sequentially labeled {@link Vertex Vertices}
 	 */
 	public static DataSet<Vertex<LongValue, NullValue>> vertexSequence(ExecutionEnvironment env, int parallelism, long vertexCount) {
-		LongValueSequenceIterator iterator = new LongValueSequenceIterator(0, vertexCount-1);
+		LongValueSequenceIterator iterator = new LongValueSequenceIterator(0, vertexCount - 1);
 
 		DataSource<LongValue> vertexLabels = env
 			.fromParallelCollection(iterator, LongValue.class)
@@ -86,7 +91,7 @@ public class GraphGeneratorUtils {
 	 */
 	public static <K, EV> DataSet<Vertex<K, NullValue>> vertexSet(DataSet<Edge<K, EV>> edges, int parallelism) {
 		DataSet<Vertex<K, NullValue>> vertexSet = edges
-			.flatMap(new EmitSrcAndTarget<K, EV>())
+			.flatMap(new EmitSrcAndTarget<>())
 				.setParallelism(parallelism)
 				.name("Emit source and target labels");
 

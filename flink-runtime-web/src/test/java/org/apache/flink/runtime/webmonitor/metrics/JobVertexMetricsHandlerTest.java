@@ -15,15 +15,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.metrics;
 
-import akka.actor.ActorSystem;
-import org.apache.flink.runtime.webmonitor.JobManagerRetriever;
-import org.apache.flink.runtime.webmonitor.handlers.JobVertexAccumulatorsHandler;
+import org.apache.flink.runtime.concurrent.Executors;
+import org.apache.flink.runtime.testingUtils.TestingUtils;
+import org.apache.flink.runtime.webmonitor.retriever.JobManagerRetriever;
+import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceRetriever;
 import org.apache.flink.util.TestLogger;
+
 import org.junit.Assert;
 import org.junit.Test;
-import scala.concurrent.ExecutionContext;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -34,6 +36,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.powermock.api.mockito.PowerMockito.mock;
 
+/**
+ * Tests for the JobVertexMetricsHandler.
+ */
 public class JobVertexMetricsHandlerTest extends TestLogger {
 	@Test
 	public void testGetPaths() {
@@ -45,7 +50,11 @@ public class JobVertexMetricsHandlerTest extends TestLogger {
 
 	@Test
 	public void getMapFor() throws Exception {
-		MetricFetcher fetcher = new MetricFetcher(mock(ActorSystem.class), mock(JobManagerRetriever.class), mock(ExecutionContext.class));
+		MetricFetcher fetcher = new MetricFetcher(
+			mock(JobManagerRetriever.class),
+			mock(MetricQueryServiceRetriever.class),
+			Executors.directExecutor(),
+			TestingUtils.TIMEOUT());
 		MetricStore store = MetricStoreTest.setupStore(fetcher.getMetricStore());
 
 		JobVertexMetricsHandler handler = new JobVertexMetricsHandler(fetcher);
@@ -63,7 +72,11 @@ public class JobVertexMetricsHandlerTest extends TestLogger {
 
 	@Test
 	public void getMapForNull() {
-		MetricFetcher fetcher = new MetricFetcher(mock(ActorSystem.class), mock(JobManagerRetriever.class), mock(ExecutionContext.class));
+		MetricFetcher fetcher = new MetricFetcher(
+			mock(JobManagerRetriever.class),
+			mock(MetricQueryServiceRetriever.class),
+			Executors.directExecutor(),
+			TestingUtils.TIMEOUT());
 		MetricStore store = fetcher.getMetricStore();
 
 		JobVertexMetricsHandler handler = new JobVertexMetricsHandler(fetcher);

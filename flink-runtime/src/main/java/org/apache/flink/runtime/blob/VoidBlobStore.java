@@ -26,30 +26,18 @@ import java.io.IOException;
 /**
  * A blob store doing nothing.
  */
-public class VoidBlobStore implements BlobStore {
+public class VoidBlobStore implements BlobStoreService {
 
 	@Override
-	public void put(File localFile, BlobKey blobKey) throws IOException {
+	public void put(File localFile, JobID jobId, BlobKey blobKey) throws IOException {
 	}
 
 	@Override
-	public void put(File localFile, JobID jobId, String key) throws IOException {
+	public void get(JobID jobId, BlobKey blobKey, File localFile) throws IOException {
 	}
 
 	@Override
-	public void get(BlobKey blobKey, File localFile) throws IOException {
-	}
-
-	@Override
-	public void get(JobID jobId, String key, File localFile) throws IOException {
-	}
-
-	@Override
-	public void delete(BlobKey blobKey) {
-	}
-
-	@Override
-	public void delete(JobID jobId, String key) {
+	public void delete(JobID jobId, BlobKey blobKey) {
 	}
 
 	@Override
@@ -57,6 +45,8 @@ public class VoidBlobStore implements BlobStore {
 	}
 
 	@Override
-	public void cleanUp() {
-	}
+	public void closeAndCleanupAllData() {}
+
+	@Override
+	public void close() throws IOException {}
 }

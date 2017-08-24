@@ -22,12 +22,14 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.TypeInfoParser;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.util.TestStreamEnvironment;
 import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchema;
 import org.apache.flink.streaming.util.serialization.KeyedSerializationSchemaWrapper;
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema;
@@ -35,7 +37,6 @@ import org.apache.flink.util.InstantiationUtil;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-
 import org.junit.ClassRule;
 import org.junit.rules.TemporaryFolder;
 import org.slf4j.Logger;
@@ -56,9 +57,15 @@ import static org.junit.Assert.fail;
  */
 @SuppressWarnings("serial")
 public class KafkaShortRetentionTestBase implements Serializable {
-	
+
 	protected static final Logger LOG = LoggerFactory.getLogger(KafkaShortRetentionTestBase.class);
-	
+
+	protected static final int NUM_TMS = 1;
+
+	protected static final int TM_SLOTS = 8;
+
+	protected static final int PARALLELISM = NUM_TMS * TM_SLOTS;
+
 	private static KafkaTestEnvironment kafkaServer;
 	private static Properties standardProps;
 	private static LocalFlinkMiniCluster flink;
@@ -82,7 +89,7 @@ public class KafkaShortRetentionTestBase implements Serializable {
 
 		LOG.info("Starting KafkaTestBase.prepare() for Kafka " + kafkaServer.getVersion());
 
-		if(kafkaServer.isSecureRunSupported()) {
+		if (kafkaServer.isSecureRunSupported()) {
 			secureProps = kafkaServer.getSecureProperties();
 		}
 
@@ -91,22 +98,26 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		specificProperties.setProperty("log.retention.minutes", "0");
 		specificProperties.setProperty("log.retention.ms", "250");
 		specificProperties.setProperty("log.retention.check.interval.ms", "100");
-		kafkaServer.prepare(1, specificProperties, false);
+		kafkaServer.prepare(kafkaServer.createConfig().setKafkaServerProperties(specificProperties));
 
 		standardProps = kafkaServer.getStandardProperties();
 
 		// start also a re-usable Flink mini cluster
-		flinkConfig.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, 1);
-		flinkConfig.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 8);
-		flinkConfig.setInteger(ConfigConstants.TASK_MANAGER_MEMORY_SIZE_KEY, 16);
+		flinkConfig.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, NUM_TMS);
+		flinkConfig.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, TM_SLOTS);
+		flinkConfig.setLong(TaskManagerOptions.MANAGED_MEMORY_SIZE, 16L);
 		flinkConfig.setString(ConfigConstants.RESTART_STRATEGY_FIXED_DELAY_DELAY, "0 s");
 
 		flink = new LocalFlinkMiniCluster(flinkConfig, false);
 		flink.start();
+
+		TestStreamEnvironment.setAsContext(flink, PARALLELISM);
 	}
 
 	@AfterClass
-	public static void shutDownServices() {
+	public static void shutDownServices() throws Exception {
+		TestStreamEnvironment.unsetAsContext();
+
 		if (flink != null) {
 			flink.shutdown();
 		}
@@ -134,15 +145,12 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		tprops.setProperty("retention.ms", "250");
 		kafkaServer.createTestTopic(topic, parallelism, 1, tprops);
 
-		final StreamExecutionEnvironment env =
-				StreamExecutionEnvironment.createRemoteEnvironment("localhost", flink.getLeaderRPCPort());
+		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(parallelism);
 		env.setRestartStrategy(RestartStrategies.noRestart()); // fail immediately
 		env.getConfig().disableSysoutLogging();
 
-
 		// ----------- add producer dataflow ----------
-
 
 		DataStream<String> stream = env.addSource(new RichParallelSourceFunction<String>() {
 
@@ -152,7 +160,6 @@ public class KafkaShortRetentionTestBase implements Serializable {
 			public void run(SourceContext<String> ctx) throws InterruptedException {
 				int cnt = getRuntimeContext().getIndexOfThisSubtask() * elementsPerPartition;
 				int limit = cnt + elementsPerPartition;
-
 
 				while (running && !stopProducer && cnt < limit) {
 					ctx.collect("element-" + cnt);
@@ -185,14 +192,13 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		kafkaServer.deleteTestTopic(topic);
 	}
 
-	
 	private class NonContinousOffsetsDeserializationSchema implements KeyedDeserializationSchema<String> {
 		private int numJumps;
 		long nextExpected = 0;
 
 		@Override
 		public String deserialize(byte[] messageKey, byte[] message, String topic, int partition, long offset) throws IOException {
-			if(offset != nextExpected) {
+			if (offset != nextExpected) {
 				numJumps++;
 				nextExpected = offset;
 				LOG.info("Registered now jump at offset {}", offset);
@@ -208,7 +214,7 @@ public class KafkaShortRetentionTestBase implements Serializable {
 
 		@Override
 		public boolean isEndOfStream(String nextElement) {
-			if( numJumps >= 5) {
+			if (numJumps >= 5) {
 				// we saw 5 jumps and no failures --> consumer can handle auto.offset.reset
 				stopProducer = true;
 				return true;
@@ -222,15 +228,14 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		}
 	}
 
-
 	/**
-	 * Ensure that the consumer is properly failing if "auto.offset.reset" is set to "none"
+	 * Ensure that the consumer is properly failing if "auto.offset.reset" is set to "none".
 	 * @throws Exception
 	 */
 	public void runFailOnAutoOffsetResetNone() throws Exception {
 		final String topic = "auto-offset-reset-none-test";
 		final int parallelism = 1;
-		
+
 		kafkaServer.createTestTopic(topic, parallelism, 1);
 
 		final StreamExecutionEnvironment env =
@@ -238,7 +243,7 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		env.setParallelism(parallelism);
 		env.setRestartStrategy(RestartStrategies.noRestart()); // fail immediately
 		env.getConfig().disableSysoutLogging();
-		
+
 		// ----------- add consumer ----------
 
 		Properties customProps = new Properties();
@@ -252,10 +257,10 @@ public class KafkaShortRetentionTestBase implements Serializable {
 
 		try {
 			env.execute("Test auto offset reset none");
-		} catch(Throwable e) {
+		} catch (Throwable e) {
 			// check if correct exception has been thrown
-			if(!e.getCause().getCause().getMessage().contains("Unable to find previous offset")  // kafka 0.8
-			 && !e.getCause().getCause().getMessage().contains("Undefined offset with no reset policy for partition") // kafka 0.9
+			if (!e.getCause().getCause().getMessage().contains("Unable to find previous offset")  // kafka 0.8
+				&& !e.getCause().getCause().getMessage().contains("Undefined offset with no reset policy for partition") // kafka 0.9
 					) {
 				throw e;
 			}
@@ -276,7 +281,7 @@ public class KafkaShortRetentionTestBase implements Serializable {
 		customProps.putAll(standardProps);
 		customProps.putAll(secureProps);
 		customProps.setProperty("auto.offset.reset", "none"); // test that "none" leads to an exception
-		
+
 		try {
 			kafkaServer.getConsumer(topic, new SimpleStringSchema(), customProps);
 			fail("should fail with an exception");

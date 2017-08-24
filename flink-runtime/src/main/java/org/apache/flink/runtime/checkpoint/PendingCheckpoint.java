@@ -21,14 +21,10 @@ package org.apache.flink.runtime.checkpoint;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.checkpoint.savepoint.Savepoint;
 import org.apache.flink.runtime.checkpoint.savepoint.SavepointStore;
-import org.apache.flink.runtime.checkpoint.savepoint.SavepointV1;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
+import org.apache.flink.runtime.checkpoint.savepoint.SavepointV2;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.state.ChainedStateHandle;
-import org.apache.flink.runtime.state.OperatorStateHandle;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.state.StateUtil;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
@@ -40,11 +36,15 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
+
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
 
@@ -62,6 +62,19 @@ import static org.apache.flink.util.Preconditions.checkState;
  */
 public class PendingCheckpoint {
 
+	/**
+	 * Result of the {@link PendingCheckpoint#acknowledgedTasks} method.
+	 */
+	public enum TaskAcknowledgeResult {
+		SUCCESS, // successful acknowledge of the task
+		DUPLICATE, // acknowledge message is a duplicate
+		UNKNOWN, // unknown task acknowledged
+		DISCARDED // pending checkpoint has been discarded
+	}
+
+	// ------------------------------------------------------------------------
+
+	/** The PendingCheckpoint logs to the same logger as the CheckpointCoordinator */
 	private static final Logger LOG = LoggerFactory.getLogger(CheckpointCoordinator.class);
 
 	private final Object lock = new Object();
@@ -72,9 +85,11 @@ public class PendingCheckpoint {
 
 	private final long checkpointTimestamp;
 
-	private final Map<JobVertexID, TaskState> taskStates;
+	private final Map<OperatorID, OperatorState> operatorStates;
 
 	private final Map<ExecutionAttemptID, ExecutionVertex> notYetAcknowledgedTasks;
+
+	private final List<MasterState> masterState;
 
 	/** Set of acknowledged tasks */
 	private final Set<ExecutionAttemptID> acknowledgedTasks;
@@ -87,7 +102,7 @@ public class PendingCheckpoint {
 	private final String targetDirectory;
 
 	/** The promise to fulfill once the checkpoint has been completed. */
-	private final FlinkCompletableFuture<CompletedCheckpoint> onCompletionPromise;
+	private final CompletableFuture<CompletedCheckpoint> onCompletionPromise;
 
 	/** The executor for potentially blocking I/O operations, like state disposal */
 	private final Executor executor;
@@ -129,9 +144,10 @@ public class PendingCheckpoint {
 		this.targetDirectory = targetDirectory;
 		this.executor = Preconditions.checkNotNull(executor);
 
-		this.taskStates = new HashMap<>();
+		this.operatorStates = new HashMap<>();
+		this.masterState = new ArrayList<>();
 		this.acknowledgedTasks = new HashSet<>(verticesToConfirm.size());
-		this.onCompletionPromise = new FlinkCompletableFuture<>();
+		this.onCompletionPromise = new CompletableFuture<>();
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -160,8 +176,8 @@ public class PendingCheckpoint {
 		return numAcknowledgedTasks;
 	}
 
-	public Map<JobVertexID, TaskState> getTaskStates() {
-		return taskStates;
+	public Map<OperatorID, OperatorState> getOperatorStates() {
+		return operatorStates;
 	}
 
 	public boolean isFullyAcknowledged() {
@@ -201,7 +217,8 @@ public class PendingCheckpoint {
 	}
 
 	/**
-	 * Sets the handle for the canceller to this pending checkoint.
+	 * Sets the handle for the canceller to this pending checkpoint. This method fails
+	 * with an exception if a handle has already been set.
 	 * 
 	 * @return true, if the handle was set, false, if the checkpoint is already disposed;
 	 */
@@ -230,7 +247,7 @@ public class PendingCheckpoint {
 	 *
 	 * @return A future to the completed checkpoint
 	 */
-	public Future<CompletedCheckpoint> getCompletionFuture() {
+	public CompletableFuture<CompletedCheckpoint> getCompletionFuture() {
 		return onCompletionPromise;
 	}
 
@@ -242,7 +259,7 @@ public class PendingCheckpoint {
 			// make sure we fulfill the promise with an exception if something fails
 			try {
 				// externalize the metadata
-				final Savepoint savepoint = new SavepointV1(checkpointId, taskStates.values());
+				final Savepoint savepoint = new SavepointV2(checkpointId, operatorStates.values(), masterState);
 
 				// TEMP FIX - The savepoint store is strictly typed to file systems currently
 				//            but the checkpoints think more generic. we need to work with file handles
@@ -307,7 +324,8 @@ public class PendingCheckpoint {
 				checkpointId,
 				checkpointTimestamp,
 				System.currentTimeMillis(),
-				new HashMap<>(taskStates),
+				operatorStates,
+				masterState,
 				props,
 				externalMetadata,
 				externalPointer);
@@ -334,13 +352,13 @@ public class PendingCheckpoint {
 	 * Acknowledges the task with the given execution attempt id and the given subtask state.
 	 *
 	 * @param executionAttemptId of the acknowledged task
-	 * @param subtaskState of the acknowledged task
+	 * @param operatorSubtaskStates of the acknowledged task
 	 * @param metrics Checkpoint metrics for the stats
 	 * @return TaskAcknowledgeResult of the operation
 	 */
 	public TaskAcknowledgeResult acknowledgeTask(
 			ExecutionAttemptID executionAttemptId,
-			SubtaskState subtaskState,
+			TaskStateSnapshot operatorSubtaskStates,
 			CheckpointMetrics metrics) {
 
 		synchronized (lock) {
@@ -360,41 +378,36 @@ public class PendingCheckpoint {
 				acknowledgedTasks.add(executionAttemptId);
 			}
 
-			JobVertexID jobVertexID = vertex.getJobvertexId();
+			List<OperatorID> operatorIDs = vertex.getJobVertex().getOperatorIDs();
 			int subtaskIndex = vertex.getParallelSubtaskIndex();
 			long ackTimestamp = System.currentTimeMillis();
 
-			long stateSize = 0;
-			if (null != subtaskState) {
-				TaskState taskState = taskStates.get(jobVertexID);
+			long stateSize = 0L;
 
-				if (null == taskState) {
-					@SuppressWarnings("deprecation")
-					ChainedStateHandle<StreamStateHandle> nonPartitionedState = 
-							subtaskState.getLegacyOperatorState();
-					ChainedStateHandle<OperatorStateHandle> partitioneableState =
-							subtaskState.getManagedOperatorState();
-					//TODO this should go away when we remove chained state, assigning state to operators directly instead
-					int chainLength;
-					if (nonPartitionedState != null) {
-						chainLength = nonPartitionedState.getLength();
-					} else if (partitioneableState != null) {
-						chainLength = partitioneableState.getLength();
-					} else {
-						chainLength = 1;
+			if (operatorSubtaskStates != null) {
+				for (OperatorID operatorID : operatorIDs) {
+
+					OperatorSubtaskState operatorSubtaskState =
+						operatorSubtaskStates.getSubtaskStateByOperatorID(operatorID);
+
+					// if no real operatorSubtaskState was reported, we insert an empty state
+					if (operatorSubtaskState == null) {
+						operatorSubtaskState = new OperatorSubtaskState();
 					}
 
-					taskState = new TaskState(
-							jobVertexID,
+					OperatorState operatorState = operatorStates.get(operatorID);
+
+					if (operatorState == null) {
+						operatorState = new OperatorState(
+							operatorID,
 							vertex.getTotalNumberOfParallelSubtasks(),
-							vertex.getMaxParallelism(),
-							chainLength);
+							vertex.getMaxParallelism());
+						operatorStates.put(operatorID, operatorState);
+					}
 
-					taskStates.put(jobVertexID, taskState);
+					operatorState.putState(subtaskIndex, operatorSubtaskState);
+					stateSize += operatorSubtaskState.getStateSize();
 				}
-
-				taskState.putState(subtaskIndex, subtaskState);
-				stateSize = subtaskState.getStateSize();
 			}
 
 			++numAcknowledgedTasks;
@@ -415,7 +428,7 @@ public class PendingCheckpoint {
 					metrics.getBytesBufferedInAlignment(),
 					alignmentDurationMillis);
 
-				statsCallback.reportSubtaskStats(jobVertexID, subtaskStateStats);
+				statsCallback.reportSubtaskStats(vertex.getJobvertexId(), subtaskStateStats);
 			}
 
 			return TaskAcknowledgeResult.SUCCESS;
@@ -423,14 +436,21 @@ public class PendingCheckpoint {
 	}
 
 	/**
-	 * Result of the {@link PendingCheckpoint#acknowledgedTasks} method.
+	 * Adds a master state (state generated on the checkpoint coordinator) to
+	 * the pending checkpoint.
+	 *
+	 * @param state The state to add
 	 */
-	public enum TaskAcknowledgeResult {
-		SUCCESS, // successful acknowledge of the task
-		DUPLICATE, // acknowledge message is a duplicate
-		UNKNOWN, // unknown task acknowledged
-		DISCARDED // pending checkpoint has been discarded
+	public void addMasterState(MasterState state) {
+		checkNotNull(state);
+
+		synchronized (lock) {
+			if (!discarded) {
+				masterState.add(state);
+			}
+		}
 	}
+
 
 	// ------------------------------------------------------------------------
 	//  Cancellation
@@ -491,6 +511,7 @@ public class PendingCheckpoint {
 	}
 
 	private void dispose(boolean releaseState) {
+
 		synchronized (lock) {
 			try {
 				numAcknowledgedTasks = -1;
@@ -498,13 +519,16 @@ public class PendingCheckpoint {
 					executor.execute(new Runnable() {
 						@Override
 						public void run() {
+
+							// discard the private states.
+							// unregistered shared states are still considered private at this point.
 							try {
-								StateUtil.bestEffortDiscardAllStateObjects(taskStates.values());
+								StateUtil.bestEffortDiscardAllStateObjects(operatorStates.values());
 							} catch (Throwable t) {
-								LOG.warn("Could not properly dispose the pending checkpoint {} of job {}.", 
-										checkpointId, jobId, t);
+								LOG.warn("Could not properly dispose the private states in the pending checkpoint {} of job {}.",
+									checkpointId, jobId, t);
 							} finally {
-								taskStates.clear();
+								operatorStates.clear();
 							}
 						}
 					});
@@ -546,7 +570,9 @@ public class PendingCheckpoint {
 		}
 	}
 
-	// --------------------------------------------------------------------------------------------
+	// ------------------------------------------------------------------------
+	//  Utilities
+	// ------------------------------------------------------------------------
 
 	@Override
 	public String toString() {

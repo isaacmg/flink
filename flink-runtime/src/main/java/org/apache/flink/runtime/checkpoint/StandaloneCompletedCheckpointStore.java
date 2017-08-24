@@ -20,6 +20,7 @@ package org.apache.flink.runtime.checkpoint;
 
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,10 +63,13 @@ public class StandaloneCompletedCheckpointStore implements CompletedCheckpointSt
 
 	@Override
 	public void addCheckpoint(CompletedCheckpoint checkpoint) throws Exception {
-		checkpoints.add(checkpoint);
+
+		checkpoints.addLast(checkpoint);
+
 		if (checkpoints.size() > maxNumberOfCheckpointsToRetain) {
 			try {
-				checkpoints.remove().subsume();
+				CompletedCheckpoint checkpointToSubsume = checkpoints.removeFirst();
+				checkpointToSubsume.discardOnSubsume();
 			} catch (Exception e) {
 				LOG.warn("Fail to subsume the old checkpoint.", e);
 			}
@@ -98,7 +102,7 @@ public class StandaloneCompletedCheckpointStore implements CompletedCheckpointSt
 			LOG.info("Shutting down");
 
 			for (CompletedCheckpoint checkpoint : checkpoints) {
-				checkpoint.discard(jobStatus);
+				checkpoint.discardOnShutdown(jobStatus);
 			}
 		} finally {
 			checkpoints.clear();

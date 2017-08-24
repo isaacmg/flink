@@ -18,9 +18,10 @@
 
 package org.apache.flink.runtime.webmonitor.handlers.checkpoints;
 
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 import org.apache.flink.runtime.checkpoint.AbstractCheckpointStats;
+
+import org.apache.flink.shaded.guava18.com.google.common.cache.Cache;
+import org.apache.flink.shaded.guava18.com.google.common.cache.CacheBuilder;
 
 import javax.annotation.Nullable;
 

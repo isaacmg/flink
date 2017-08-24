@@ -15,14 +15,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava18.com.google.common.collect.Lists;
+
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.List;
 
+/**
+ * Tests for the JarAccessDeniedHandler.
+ */
 public class JarAccessDeniedHandlerTest {
 	@Test
 	public void testGetPaths() {

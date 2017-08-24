@@ -29,6 +29,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.akka.FlinkUntypedActor;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.leaderelection.TestingLeaderRetrievalService;
 import org.apache.flink.runtime.messages.Acknowledge;
@@ -306,11 +307,14 @@ public class JobClientActorTest extends TestLogger {
 			leaderSessionID
 		);
 
+		TestingHighAvailabilityServices highAvailabilityServices = new TestingHighAvailabilityServices();
+		highAvailabilityServices.setJobMasterLeaderRetriever(HighAvailabilityServices.DEFAULT_JOB_ID, testingLeaderRetrievalService);
+
 		JobListeningContext jobListeningContext =
 			JobClient.submitJob(
 				system,
 				clientConfig,
-				testingLeaderRetrievalService,
+				highAvailabilityServices,
 				testJobGraph,
 				timeout,
 				false,
@@ -328,6 +332,8 @@ public class JobClientActorTest extends TestLogger {
 			Assert.fail();
 		} catch (JobExecutionException e) {
 			// this is what we want
+		} finally {
+			highAvailabilityServices.closeAndCleanupAllData();
 		}
 	}
 
@@ -341,6 +347,9 @@ public class JobClientActorTest extends TestLogger {
 
 		@Override
 		protected void handleMessage(Object message) throws Exception {
+			if (message instanceof RequestBlobManagerPort$) {
+				getSender().tell(1337, getSelf());
+			}
 		}
 
 		@Override
@@ -382,7 +391,9 @@ public class JobClientActorTest extends TestLogger {
 					testFuture.tell(Acknowledge.get(), getSelf());
 				}
 			}
-			else if (message instanceof RegisterTest) {
+			else if (message instanceof RequestBlobManagerPort$) {
+				getSender().tell(1337, getSelf());
+			} else if (message instanceof RegisterTest) {
 				testFuture = getSender();
 
 				if (jobAccepted) {

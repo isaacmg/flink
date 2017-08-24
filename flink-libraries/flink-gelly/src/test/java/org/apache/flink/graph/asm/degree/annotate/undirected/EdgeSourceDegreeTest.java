@@ -28,10 +28,14 @@ import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link EdgeSourceDegree}.
+ */
 public class EdgeSourceDegreeTest
 extends AsmTestBase {
 
@@ -55,7 +59,7 @@ extends AsmTestBase {
 			"(5,3,((null),1))";
 
 		DataSet<Edge<IntValue, Tuple2<NullValue, LongValue>>> sourceDegreeOnSourceId = undirectedSimpleGraph
-			.run(new EdgeSourceDegree<IntValue, NullValue, NullValue>());
+			.run(new EdgeSourceDegree<>());
 
 		TestBaseUtils.compareResultAsText(sourceDegreeOnSourceId.collect(), expectedResult);
 
@@ -69,8 +73,8 @@ extends AsmTestBase {
 	@Test
 	public void testWithRMatGraph()
 			throws Exception {
-		DataSet<Edge<LongValue, Tuple2<NullValue, LongValue>>> sourceDegreeOnSourceId = undirectedRMatGraph
-			.run(new EdgeSourceDegree<LongValue, NullValue, NullValue>());
+		DataSet<Edge<LongValue, Tuple2<NullValue, LongValue>>> sourceDegreeOnSourceId = undirectedRMatGraph(10, 16)
+			.run(new EdgeSourceDegree<>());
 
 		Checksum checksumOnSourceId = new ChecksumHashCode<Edge<LongValue, Tuple2<NullValue, LongValue>>>()
 			.run(sourceDegreeOnSourceId)
@@ -79,7 +83,7 @@ extends AsmTestBase {
 		assertEquals(20884, checksumOnSourceId.getCount());
 		assertEquals(0x000000019d8f0070L, checksumOnSourceId.getChecksum());
 
-		DataSet<Edge<LongValue, Tuple2<NullValue, LongValue>>> sourceDegreeOnTargetId = undirectedRMatGraph
+		DataSet<Edge<LongValue, Tuple2<NullValue, LongValue>>> sourceDegreeOnTargetId = undirectedRMatGraph(10, 16)
 			.run(new EdgeSourceDegree<LongValue, NullValue, NullValue>()
 				.setReduceOnTargetId(true));
 

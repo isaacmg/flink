@@ -22,10 +22,14 @@ import org.apache.flink.graph.Graph;
 import org.apache.flink.graph.asm.AsmTestBase;
 import org.apache.flink.graph.asm.dataset.ChecksumHashCode.Checksum;
 import org.apache.flink.graph.test.TestGraphUtils;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link ChecksumHashCode}.
+ */
 public class ChecksumHashCodeTest
 extends AsmTestBase {
 
@@ -37,7 +41,7 @@ extends AsmTestBase {
 			env);
 
 		Checksum checksum = graph
-			.run(new ChecksumHashCode<Long, Long, Long>())
+			.run(new ChecksumHashCode<>())
 			.execute();
 
 		assertEquals(checksum.getCount(), 12L);

@@ -18,18 +18,8 @@
 
 package org.apache.flink.runtime.io.network.netty;
 
-import io.netty.buffer.Unpooled;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandler;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelOutboundHandlerAdapter;
-import io.netty.channel.ChannelPromise;
-import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
-import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
 import org.apache.flink.runtime.io.network.netty.NettyTestUtil.NettyServerAndClient;
 import org.apache.flink.runtime.io.network.netty.exception.LocalTransportException;
 import org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException;
@@ -38,6 +28,17 @@ import org.apache.flink.runtime.io.network.partition.ResultPartitionProvider;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannelID;
 import org.apache.flink.runtime.io.network.partition.consumer.RemoteInputChannel;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
+
+import org.apache.flink.shaded.netty4.io.netty.buffer.Unpooled;
+import org.apache.flink.shaded.netty4.io.netty.channel.Channel;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelFuture;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandlerAdapter;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelOutboundHandlerAdapter;
+import org.apache.flink.shaded.netty4.io.netty.channel.ChannelPromise;
+import org.apache.flink.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
+
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -85,8 +86,7 @@ public class ClientTransportErrorHandlingTest {
 			public ChannelHandler[] getClientChannelHandlers() {
 				return new PartitionRequestProtocol(
 						mock(ResultPartitionProvider.class),
-						mock(TaskEventDispatcher.class),
-						mock(NetworkBufferPool.class)).getClientChannelHandlers();
+						mock(TaskEventDispatcher.class)).getClientChannelHandlers();
 			}
 		};
 
@@ -235,8 +235,7 @@ public class ClientTransportErrorHandlingTest {
 			public ChannelHandler[] getClientChannelHandlers() {
 				return new PartitionRequestProtocol(
 						mock(ResultPartitionProvider.class),
-						mock(TaskEventDispatcher.class),
-						mock(NetworkBufferPool.class)).getClientChannelHandlers();
+						mock(TaskEventDispatcher.class)).getClientChannelHandlers();
 			}
 		};
 
@@ -383,8 +382,7 @@ public class ClientTransportErrorHandlingTest {
 	private EmbeddedChannel createEmbeddedChannel() {
 		PartitionRequestProtocol protocol = new PartitionRequestProtocol(
 				mock(ResultPartitionProvider.class),
-				mock(TaskEventDispatcher.class),
-				mock(NetworkBufferPool.class));
+				mock(TaskEventDispatcher.class));
 
 		return new EmbeddedChannel(protocol.getClientChannelHandlers());
 	}

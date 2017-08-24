@@ -24,6 +24,7 @@ import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.runtime.blob.BlobCache;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
@@ -45,6 +46,7 @@ import org.apache.flink.runtime.io.network.NetworkEnvironment;
 import org.apache.flink.runtime.io.network.netty.PartitionProducerStateChecker;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.InputSplitProvider;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.operators.testutils.UnregisteredTaskMetricsGroup;
@@ -53,7 +55,9 @@ import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointStreamFactory.CheckpointStateOutputStream;
+import org.apache.flink.runtime.state.DefaultOperatorStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.OperatorStateBackend;
 import org.apache.flink.runtime.state.OperatorStateCheckpointOutputStream;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.runtime.state.StreamStateHandle;
@@ -65,6 +69,7 @@ import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.StreamFilter;
 import org.apache.flink.util.SerializedValue;
+
 import org.junit.Test;
 
 import java.io.IOException;
@@ -78,8 +83,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * This test checks that task checkpoints that block and do not react to thread interrupts
- * are
+ * This test checks that task checkpoints that block and do not react to thread interrupts.
  */
 public class BlockingCheckpointsTest {
 
@@ -91,6 +95,7 @@ public class BlockingCheckpointsTest {
 		Configuration taskConfig = new Configuration();
 		StreamConfig cfg = new StreamConfig(taskConfig);
 		cfg.setStreamOperator(new TestOperator());
+		cfg.setOperatorID(new OperatorID());
 		cfg.setStateBackend(new LockingStreamStateBackend());
 
 		Task task = createTask(taskConfig);
@@ -152,6 +157,7 @@ public class BlockingCheckpointsTest {
 				mock(TaskManagerActions.class),
 				mock(InputSplitProvider.class),
 				mock(CheckpointResponder.class),
+				mock(BlobCache.class),
 				new FallbackLibraryCacheManager(),
 				new FileCache(new String[] { EnvironmentInformation.getTemporaryFileDirectory() }),
 				new TestingTaskManagerRuntimeInfo(),
@@ -186,6 +192,14 @@ public class BlockingCheckpointsTest {
 				KeyGroupRange keyGroupRange, TaskKvStateRegistry kvStateRegistry) {
 
 			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public OperatorStateBackend createOperatorStateBackend(Environment env, String operatorIdentifier) throws Exception {
+			return new DefaultOperatorStateBackend(
+				getClass().getClassLoader(),
+				new ExecutionConfig(),
+				true);
 		}
 	}
 
@@ -271,10 +285,9 @@ public class BlockingCheckpointsTest {
 		}
 	}
 
-	// ------------------------------------------------------------------------
-	//  stream task that simply triggers a checkpoint
-	// ------------------------------------------------------------------------
-
+	/**
+	 * Stream task that simply triggers a checkpoint.
+	 */
 	public static final class TestStreamTask extends OneInputStreamTask<Object, Object> {
 
 		@Override

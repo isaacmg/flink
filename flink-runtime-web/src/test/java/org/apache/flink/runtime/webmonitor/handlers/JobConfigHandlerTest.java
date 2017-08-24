@@ -15,14 +15,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.api.common.ArchivedExecutionConfig;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
+import org.apache.flink.runtime.webmonitor.ExecutionGraphHolder;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.JsonArchivist;
 import org.apache.flink.runtime.webmonitor.utils.ArchivedJobGenerationUtils;
+
+import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -30,6 +33,11 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
 
+import static org.mockito.Mockito.mock;
+
+/**
+ * Tests for the JobConfigHandler.
+ */
 public class JobConfigHandlerTest {
 
 	@Test
@@ -47,7 +55,7 @@ public class JobConfigHandlerTest {
 
 	@Test
 	public void testGetPaths() {
-		JobConfigHandler handler = new JobConfigHandler(null);
+		JobConfigHandler handler = new JobConfigHandler(mock(ExecutionGraphHolder.class));
 		String[] paths = handler.getPaths();
 		Assert.assertEquals(1, paths.length);
 		Assert.assertEquals("/jobs/:jobid/config", paths[0]);
@@ -60,7 +68,7 @@ public class JobConfigHandlerTest {
 	}
 
 	private static void compareJobConfig(AccessExecutionGraph originalJob, String answer) throws IOException {
-		JsonNode job = ArchivedJobGenerationUtils.mapper.readTree(answer);
+		JsonNode job = ArchivedJobGenerationUtils.MAPPER.readTree(answer);
 
 		Assert.assertEquals(originalJob.getJobID().toString(), job.get("jid").asText());
 		Assert.assertEquals(originalJob.getJobName(), job.get("name").asText());

@@ -10,10 +10,14 @@
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
  */
+
 package org.apache.flink.python.api.streaming.plan;
 
 import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.python.api.PythonOptions;
 import org.apache.flink.python.api.streaming.util.StreamPrinter;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,10 +26,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 
-import static org.apache.flink.python.api.PythonPlanBinder.FLINK_PYTHON2_BINARY_PATH;
-import static org.apache.flink.python.api.PythonPlanBinder.FLINK_PYTHON3_BINARY_PATH;
 import static org.apache.flink.python.api.PythonPlanBinder.FLINK_PYTHON_PLAN_NAME;
-import static org.apache.flink.python.api.PythonPlanBinder.usePython3;
 
 /**
  * Generic class to exchange data during the plan phase.
@@ -33,6 +34,7 @@ import static org.apache.flink.python.api.PythonPlanBinder.usePython3;
 public class PythonPlanStreamer {
 
 	protected static final Logger LOG = LoggerFactory.getLogger(PythonPlanStreamer.class);
+	private final Configuration config;
 
 	protected PythonPlanSender sender;
 	protected PythonPlanReceiver receiver;
@@ -40,6 +42,10 @@ public class PythonPlanStreamer {
 	private Process process;
 	private ServerSocket server;
 	private Socket socket;
+
+	public PythonPlanStreamer(Configuration config) {
+		this.config = config;
+	}
 
 	public Object getRecord() throws IOException {
 		return getRecord(false);
@@ -58,7 +64,7 @@ public class PythonPlanStreamer {
 	}
 
 	private void startPython(String tmpPath, String args) throws IOException {
-		String pythonBinaryPath = usePython3 ? FLINK_PYTHON3_BINARY_PATH : FLINK_PYTHON2_BINARY_PATH;
+		String pythonBinaryPath = config.getString(PythonOptions.PYTHON_BINARY_PATH);
 
 		try {
 			Runtime.getRuntime().exec(pythonBinaryPath);
@@ -67,8 +73,8 @@ public class PythonPlanStreamer {
 		}
 		process = Runtime.getRuntime().exec(pythonBinaryPath + " -B " + tmpPath + FLINK_PYTHON_PLAN_NAME + args);
 
-		new StreamPrinter(process.getInputStream()).start();
-		new StreamPrinter(process.getErrorStream()).start();
+		new Thread(new StreamPrinter(process.getInputStream())).start();
+		new Thread(new StreamPrinter(process.getErrorStream())).start();
 
 		server = new ServerSocket(0);
 		server.setSoTimeout(50);
@@ -86,7 +92,7 @@ public class PythonPlanStreamer {
 			return false;
 		}
 		while (true) {
-			try {		
+			try {
 				socket = server.accept();
 				sender = new PythonPlanSender(socket.getOutputStream());
 				receiver = new PythonPlanReceiver(socket.getInputStream());
@@ -103,7 +109,7 @@ public class PythonPlanStreamer {
 			}
 		}
 	}
-	
+
 	public void finishPlanMode() {
 		try {
 			socket.close();
@@ -139,7 +145,7 @@ public class PythonPlanStreamer {
 			return ProcessState.RUNNING;
 		}
 	}
-	
+
 	private enum ProcessState {
 		RUNNING,
 		FAILED,

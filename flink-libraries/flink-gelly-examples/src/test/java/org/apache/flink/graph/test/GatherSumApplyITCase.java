@@ -34,12 +34,16 @@ import org.apache.flink.graph.utils.GraphUtils.IdentityMapper;
 import org.apache.flink.test.util.MultipleProgramsTestBase;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
+
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.List;
 
+/**
+ * Tests for gather-sum-apply.
+ */
 @RunWith(Parameterized.class)
 public class GatherSumApplyITCase extends MultipleProgramsTestBase {
 
@@ -63,10 +67,10 @@ public class GatherSumApplyITCase extends MultipleProgramsTestBase {
 
 		Graph<Long, Long, NullValue> inputGraph = Graph.fromDataSet(
 			ConnectedComponentsDefaultData.getDefaultEdgeDataSet(env),
-			new IdentityMapper<Long>(), env);
+			new IdentityMapper<>(), env);
 
 		List<Vertex<Long, Long>> result = inputGraph.run(
-			new GSAConnectedComponents<Long, Long, NullValue>(16)).collect();
+			new GSAConnectedComponents<>(16)).collect();
 
 		compareResultAsTuples(result, expectedResultCC);
 	}
@@ -81,10 +85,10 @@ public class GatherSumApplyITCase extends MultipleProgramsTestBase {
 			new LongToLongValue());
 
 		Graph<LongValue, LongValue, NullValue> inputGraph = Graph.fromDataSet(
-			edges, new IdentityMapper<LongValue>(), env);
+			edges, new IdentityMapper<>(), env);
 
 		List<Vertex<LongValue, LongValue>> result = inputGraph.run(
-			new GSAConnectedComponents<LongValue, LongValue, NullValue>(16)).collect();
+			new GSAConnectedComponents<>(16)).collect();
 
 		compareResultAsTuples(result, expectedResultCC);
 	}
@@ -102,7 +106,7 @@ public class GatherSumApplyITCase extends MultipleProgramsTestBase {
 			new InitMapperSSSP(), env);
 
 		List<Vertex<Long, Double>> result = inputGraph.run(
-			new GSASingleSourceShortestPaths<Long, NullValue>(1L, 16)).collect();
+			new GSASingleSourceShortestPaths<>(1L, 16)).collect();
 
 		String expectedResult = "1,0.0\n" +
 			"2,12.0\n" +

@@ -21,11 +21,12 @@ import org.apache.calcite.avatica.util.DateTimeUtils.MILLIS_PER_DAY
 import org.apache.calcite.avatica.util.{DateTimeUtils, TimeUnitRange}
 import org.apache.calcite.util.BuiltInMethod
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo._
-import org.apache.flink.api.common.typeinfo.{NumericTypeInfo, PrimitiveArrayTypeInfo, SqlTimeTypeInfo, TypeInformation}
-import org.apache.flink.api.java.typeutils.ObjectArrayTypeInfo
+import org.apache.flink.api.common.typeinfo._
+import org.apache.flink.api.java.typeutils.{MapTypeInfo, ObjectArrayTypeInfo}
 import org.apache.flink.table.codegen.CodeGenUtils._
-import org.apache.flink.table.codegen.{CodeGenerator, CodeGenException, GeneratedExpression}
-import org.apache.flink.table.typeutils.TimeIntervalTypeInfo
+import org.apache.flink.table.codegen.calls.CallGenerator.generateCallIfArgsNotNull
+import org.apache.flink.table.codegen.{CodeGenException, CodeGenerator, GeneratedExpression}
+import org.apache.flink.table.typeutils.{TimeIndicatorTypeInfo, TimeIntervalTypeInfo, TypeCoercion}
 import org.apache.flink.table.typeutils.TypeCheckUtils._
 
 object ScalarOperators {
@@ -79,6 +80,94 @@ object ScalarOperators {
     }
   }
 
+  def generateIn(
+      codeGenerator: CodeGenerator,
+      needle: GeneratedExpression,
+      haystack: Seq[GeneratedExpression])
+    : GeneratedExpression = {
+
+    // determine common numeric type
+    val widerType = TypeCoercion.widerTypeOf(needle.resultType, haystack.head.resultType)
+
+    // we need to normalize the values for the hash set
+    // decimals are converted to a normalized string
+    val castNumeric = widerType match {
+
+      case Some(t) => (value: GeneratedExpression) =>
+        val casted = numericCasting(value.resultType, t)(value.resultTerm)
+        if (isDecimal(t)) {
+          s"$casted.stripTrailingZeros().toEngineeringString()"
+        } else {
+          casted
+        }
+
+      case None => (value: GeneratedExpression) =>
+        if (isDecimal(value.resultType)) {
+          s"${value.resultTerm}.stripTrailingZeros().toEngineeringString()"
+        } else {
+          value.resultTerm
+        }
+    }
+
+    // add elements to hash set if they are constant
+    if (haystack.forall(_.literal)) {
+      val elements = haystack.map { element =>
+        element.copy(
+            castNumeric(element), // cast element to wider type
+            element.nullTerm,
+            element.code,
+            widerType.getOrElse(needle.resultType))
+      }
+      val setTerm = codeGenerator.addReusableSet(elements)
+
+      val castedNeedle = needle.copy(
+        castNumeric(needle), // cast needle to wider type
+        needle.nullTerm,
+        needle.code,
+        widerType.getOrElse(needle.resultType))
+
+      val resultTerm = newName("result")
+      val nullTerm = newName("isNull")
+      val resultTypeTerm = primitiveTypeTermForTypeInfo(BOOLEAN_TYPE_INFO)
+      val defaultValue = primitiveDefaultValue(BOOLEAN_TYPE_INFO)
+
+      val operatorCode = if (codeGenerator.nullCheck) {
+        s"""
+          |${castedNeedle.code}
+          |$resultTypeTerm $resultTerm;
+          |boolean $nullTerm;
+          |if (!${castedNeedle.nullTerm}) {
+          |  $resultTerm = $setTerm.contains(${castedNeedle.resultTerm});
+          |  $nullTerm = !$resultTerm && $setTerm.contains(null);
+          |}
+          |else {
+          |  $resultTerm = $defaultValue;
+          |  $nullTerm = true;
+          |}
+          |""".stripMargin
+      }
+      else {
+        s"""
+          |${castedNeedle.code}
+          |$resultTypeTerm $resultTerm = $setTerm.contains(${castedNeedle.resultTerm});
+          |""".stripMargin
+      }
+
+      GeneratedExpression(resultTerm, nullTerm, operatorCode, BOOLEAN_TYPE_INFO)
+    } else {
+      // we use a chain of ORs for a set that contains non-constant elements
+      haystack
+        .map(generateEquals(codeGenerator.nullCheck, needle, _))
+        .reduce( (left, right) =>
+          generateOr(
+            nullCheck = true,
+            left,
+            right
+          )
+        )
+    }
+  }  
+  
   def generateEquals(
       nullCheck: Boolean,
       left: GeneratedExpression,
@@ -93,7 +182,8 @@ object ScalarOperators {
       generateComparison("==", nullCheck, left, right)
     }
     // array types
-    else if (isArray(left.resultType) && left.resultType == right.resultType) {
+    else if (isArray(left.resultType) &&
+        left.resultType.getTypeClass == right.resultType.getTypeClass) {
       generateOperatorIfNotNull(nullCheck, BOOLEAN_TYPE_INFO, left, right) {
         (leftTerm, rightTerm) => s"java.util.Arrays.equals($leftTerm, $rightTerm)"
       }
@@ -133,7 +223,8 @@ object ScalarOperators {
       generateComparison("!=", nullCheck, left, right)
     }
     // array types
-    else if (isArray(left.resultType) && left.resultType == right.resultType) {
+    else if (isArray(left.resultType) &&
+        left.resultType.getTypeClass == right.resultType.getTypeClass) {
       generateOperatorIfNotNull(nullCheck, BOOLEAN_TYPE_INFO, left, right) {
         (leftTerm, rightTerm) => s"!java.util.Arrays.equals($leftTerm, $rightTerm)"
       }
@@ -452,8 +543,18 @@ object ScalarOperators {
       operand: GeneratedExpression,
       targetType: TypeInformation[_])
     : GeneratedExpression = (operand.resultType, targetType) match {
+
+    // special case: cast from TimeIndicatorTypeInfo to SqlTimeTypeInfo
+    case (ti: TimeIndicatorTypeInfo, SqlTimeTypeInfo.TIMESTAMP) =>
+      operand.copy(resultType = SqlTimeTypeInfo.TIMESTAMP) // just replace the TypeInformation
+
     // identity casting
     case (fromTp, toTp) if fromTp == toTp =>
+      operand
+
+    // array identity casting
+    // (e.g. for Integer[] that can be ObjectArrayTypeInfo or BasicArrayTypeInfo)
+    case (fromTp, toTp) if isArray(fromTp) && fromTp.getTypeClass == toTp.getTypeClass =>
       operand
 
     // Date/Time/Timestamp -> String
@@ -479,13 +580,13 @@ object ScalarOperators {
       }
 
     // Object array -> String
-    case (_:ObjectArrayTypeInfo[_, _], STRING_TYPE_INFO) =>
+    case (_: ObjectArrayTypeInfo[_, _] | _: BasicArrayTypeInfo[_, _], STRING_TYPE_INFO) =>
       generateUnaryOperatorIfNotNull(nullCheck, targetType, operand) {
         (operandTerm) => s"java.util.Arrays.deepToString($operandTerm)"
       }
 
     // Primitive array -> String
-    case (_:PrimitiveArrayTypeInfo[_], STRING_TYPE_INFO) =>
+    case (_: PrimitiveArrayTypeInfo[_], STRING_TYPE_INFO) =>
       generateUnaryOperatorIfNotNull(nullCheck, targetType, operand) {
         (operandTerm) => s"java.util.Arrays.toString($operandTerm)"
       }
@@ -792,37 +893,45 @@ object ScalarOperators {
 
     val resultTerm = newName("result")
 
+    def unboxArrayElement(componentInfo: TypeInformation[_]): GeneratedExpression = {
+      // get boxed array element
+      val resultTypeTerm = boxedTypeTermForTypeInfo(componentInfo)
+
+      val arrayAccessCode = if (codeGenerator.nullCheck) {
+        s"""
+          |${array.code}
+          |${index.code}
+          |$resultTypeTerm $resultTerm = (${array.nullTerm} || ${index.nullTerm}) ?
+          |  null : ${array.resultTerm}[${index.resultTerm} - 1];
+          |""".stripMargin
+      } else {
+        s"""
+          |${array.code}
+          |${index.code}
+          |$resultTypeTerm $resultTerm = ${array.resultTerm}[${index.resultTerm} - 1];
+          |""".stripMargin
+      }
+
+      // generate unbox code
+      val unboxing = codeGenerator.generateInputFieldUnboxing(componentInfo, resultTerm)
+
+      unboxing.copy(code =
+        s"""
+          |$arrayAccessCode
+          |${unboxing.code}
+          |""".stripMargin
+      )
+    }
+
     array.resultType match {
 
       // unbox object array types
       case oati: ObjectArrayTypeInfo[_, _] =>
-        // get boxed array element
-        val resultTypeTerm = boxedTypeTermForTypeInfo(oati.getComponentInfo)
+        unboxArrayElement(oati.getComponentInfo)
 
-        val arrayAccessCode = if (codeGenerator.nullCheck) {
-          s"""
-            |${array.code}
-            |${index.code}
-            |$resultTypeTerm $resultTerm = (${array.nullTerm} || ${index.nullTerm}) ?
-            |  null : ${array.resultTerm}[${index.resultTerm} - 1];
-            |""".stripMargin
-        } else {
-          s"""
-            |${array.code}
-            |${index.code}
-            |$resultTypeTerm $resultTerm = ${array.resultTerm}[${index.resultTerm} - 1];
-            |""".stripMargin
-        }
-
-        // generate unbox code
-        val unboxing = codeGenerator.generateInputFieldUnboxing(oati.getComponentInfo, resultTerm)
-
-        unboxing.copy(code =
-          s"""
-            |$arrayAccessCode
-            |${unboxing.code}
-            |""".stripMargin
-        )
+      // unbox basic array types
+      case bati: BasicArrayTypeInfo[_, _] =>
+        unboxArrayElement(bati.getComponentInfo)
 
       // no unboxing necessary
       case pati: PrimitiveArrayTypeInfo[_] =>
@@ -841,6 +950,7 @@ object ScalarOperators {
     val resultTerm = newName("result")
     val resultType = array.resultType match {
       case oati: ObjectArrayTypeInfo[_, _] => oati.getComponentInfo
+      case bati: BasicArrayTypeInfo[_, _] => bati.getComponentInfo
       case pati: PrimitiveArrayTypeInfo[_] => pati.getComponentType
     }
     val resultTypeTerm = primitiveTypeTermForTypeInfo(resultType)
@@ -852,31 +962,38 @@ object ScalarOperators {
       s"${array.resultTerm}.length"
     }
 
+    def unboxArrayElement(componentInfo: TypeInformation[_]): String = {
+      // generate unboxing code
+      val unboxing = codeGenerator.generateInputFieldUnboxing(
+        componentInfo,
+        s"${array.resultTerm}[0]")
+
+      s"""
+        |${array.code}
+        |${if (codeGenerator.nullCheck) s"boolean $nullTerm;" else "" }
+        |$resultTypeTerm $resultTerm;
+        |switch ($arrayLengthCode) {
+        |  case 0:
+        |    ${if (codeGenerator.nullCheck) s"$nullTerm = true;" else "" }
+        |    $resultTerm = $defaultValue;
+        |    break;
+        |  case 1:
+        |    ${unboxing.code}
+        |    ${if (codeGenerator.nullCheck) s"$nullTerm = ${unboxing.nullTerm};" else "" }
+        |    $resultTerm = ${unboxing.resultTerm};
+        |    break;
+        |  default:
+        |    throw new RuntimeException("Array has more than one element.");
+        |}
+        |""".stripMargin
+    }
+
     val arrayAccessCode = array.resultType match {
       case oati: ObjectArrayTypeInfo[_, _] =>
-        // generate unboxing code
-        val unboxing = codeGenerator.generateInputFieldUnboxing(
-          oati.getComponentInfo,
-          s"${array.resultTerm}[0]")
+        unboxArrayElement(oati.getComponentInfo)
 
-        s"""
-          |${array.code}
-          |${if (codeGenerator.nullCheck) s"boolean $nullTerm;" else "" }
-          |$resultTypeTerm $resultTerm;
-          |switch ($arrayLengthCode) {
-          |  case 0:
-          |    ${if (codeGenerator.nullCheck) s"$nullTerm = true;" else "" }
-          |    $resultTerm = $defaultValue;
-          |    break;
-          |  case 1:
-          |    ${unboxing.code}
-          |    ${if (codeGenerator.nullCheck) s"$nullTerm = ${unboxing.nullTerm};" else "" }
-          |    $resultTerm = ${unboxing.resultTerm};
-          |    break;
-          |  default:
-          |    throw new RuntimeException("Array has more than one element.");
-          |}
-          |""".stripMargin
+      case bati: BasicArrayTypeInfo[_, _] =>
+        unboxArrayElement(bati.getComponentInfo)
 
       case pati: PrimitiveArrayTypeInfo[_] =>
         s"""
@@ -909,6 +1026,79 @@ object ScalarOperators {
     generateUnaryOperatorIfNotNull(nullCheck, INT_TYPE_INFO, array) {
       (operandTerm) => s"${array.resultTerm}.length"
     }
+  }
+
+  def generateConcat(
+      nullCheck: Boolean,
+      operands: Seq[GeneratedExpression])
+    : GeneratedExpression = {
+
+    generateCallIfArgsNotNull(nullCheck, STRING_TYPE_INFO, operands) {
+      (terms) =>s"${qualifyMethod(BuiltInMethods.CONCAT)}(${terms.mkString(", ")})"
+    }
+  }
+
+  def generateConcatWs(operands: Seq[GeneratedExpression]): GeneratedExpression = {
+
+    val resultTerm = newName("result")
+    val nullTerm = newName("isNull")
+    val defaultValue = primitiveDefaultValue(Types.STRING)
+
+    val tempTerms = operands.tail.map(_ => newName("temp"))
+
+    val operatorCode =
+      s"""
+        |${operands.map(_.code).mkString("\n")}
+        |
+        |String $resultTerm;
+        |boolean $nullTerm;
+        |if (${operands.head.nullTerm}) {
+        |  $nullTerm = true;
+        |  $resultTerm = $defaultValue;
+        |} else {
+        |  ${operands.tail.zip(tempTerms).map {
+                case (o: GeneratedExpression, t: String) =>
+                  s"String $t;\n" +
+                  s"  if (${o.nullTerm}) $t = null; else $t = ${o.resultTerm};"
+              }.mkString("\n")
+            }
+        |  $nullTerm = false;
+        |  $resultTerm = ${qualifyMethod(BuiltInMethods.CONCAT_WS)}
+        |   (${operands.head.resultTerm}, ${tempTerms.mkString(", ")});
+        |}
+        |""".stripMargin
+
+    GeneratedExpression(resultTerm, nullTerm, operatorCode, Types.STRING)
+  }
+
+  def generateMapGet(
+      codeGenerator: CodeGenerator,
+      map: GeneratedExpression,
+      key: GeneratedExpression)
+  : GeneratedExpression = {
+
+    val resultTerm = newName("result")
+    val nullTerm = newName("isNull")
+    val ty = map.resultType.asInstanceOf[MapTypeInfo[_,_]]
+    val resultType = ty.getValueTypeInfo
+    val resultTypeTerm = boxedTypeTermForTypeInfo(ty.getValueTypeInfo)
+    val accessCode = if (codeGenerator.nullCheck) {
+          s"""
+             |${map.code}
+             |${key.code}
+             |boolean $nullTerm = (${map.nullTerm} || ${key.nullTerm});
+             |$resultTypeTerm $resultTerm = $nullTerm ?
+             |  null : ($resultTypeTerm) ${map.resultTerm}.get(${key.resultTerm});
+             |""".stripMargin
+        } else {
+          s"""
+             |${map.code}
+             |${key.code}
+             |$resultTypeTerm $resultTerm = ($resultTypeTerm)
+             | ${map.resultTerm}.get(${key.resultTerm});
+             |""".stripMargin
+        }
+    GeneratedExpression(resultTerm, nullTerm, accessCode, resultType)
   }
 
   // ----------------------------------------------------------------------------------------------
@@ -999,7 +1189,7 @@ object ScalarOperators {
     case "*" => "multiply"
     case "/" => "divide"
     case "%" => "remainder"
-    case _ => throw new CodeGenException("Unsupported decimal arithmetic operator.")
+    case _ => throw new CodeGenException(s"Unsupported decimal arithmetic operator: '$operator'")
   }
 
   private def numericCasting(
@@ -1014,7 +1204,7 @@ object ScalarOperators {
       case LONG_TYPE_INFO => "longValueExact"
       case FLOAT_TYPE_INFO => "floatValue"
       case DOUBLE_TYPE_INFO => "doubleValue"
-      case _ => throw new CodeGenException("Unsupported decimal casting type.")
+      case _ => throw new CodeGenException(s"Unsupported decimal casting type: '$targetType'")
     }
 
     val resultTypeTerm = primitiveTypeTermForTypeInfo(resultType)
@@ -1034,6 +1224,10 @@ object ScalarOperators {
     // result type and operand type are numeric but not decimal
     else if (isNumeric(operandType) && isNumeric(resultType)
         && !isDecimal(operandType) && !isDecimal(resultType)) {
+      (operandTerm) => s"(($resultTypeTerm) $operandTerm)"
+    }
+    // result type is time interval and operand type is integer
+    else if (isTimeInterval(resultType) && isInteger(operandType)){
       (operandTerm) => s"(($resultTypeTerm) $operandTerm)"
     }
     else {

@@ -24,18 +24,16 @@ import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.SlotID;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.resourcemanager.messages.taskexecutor.TMSlotRequestReply;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.PartitionInfo;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.rpc.RpcGateway;
 import org.apache.flink.runtime.rpc.RpcTimeout;
-import org.apache.flink.runtime.taskexecutor.exceptions.SlotAllocationException;
 import org.apache.flink.runtime.taskmanager.Task;
 
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * {@link TaskExecutor} RPC gateway interface
@@ -48,10 +46,9 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param slotId slot id for the request
 	 * @param allocationId id for the request
 	 * @param resourceManagerLeaderId current leader id of the ResourceManager
-	 * @throws SlotAllocationException if the slot allocation fails
 	 * @return answer to the slot request
 	 */
-	Future<TMSlotRequestReply> requestSlot(
+	CompletableFuture<Acknowledge> requestSlot(
 		SlotID slotId,
 		JobID jobId,
 		AllocationID allocationId,
@@ -67,7 +64,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param timeout of the submit operation
 	 * @return Future acknowledge of the successful operation
 	 */
-	Future<Acknowledge> submitTask(
+	CompletableFuture<Acknowledge> submitTask(
 		TaskDeploymentDescriptor tdd,
 		UUID leaderId,
 		@RpcTimeout Time timeout);
@@ -80,7 +77,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param timeout for the update partitions operation
 	 * @return Future acknowledge if the partitions have been successfully updated
 	 */
-	Future<Acknowledge> updatePartitions(
+	CompletableFuture<Acknowledge> updatePartitions(
 		ExecutionAttemptID executionAttemptID,
 		Iterable<PartitionInfo> partitionInfos,
 		@RpcTimeout Time timeout);
@@ -102,7 +99,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param checkpointOptions for performing the checkpoint
 	 * @return Future acknowledge if the checkpoint has been successfully triggered
 	 */
-	Future<Acknowledge> triggerCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointID, long checkpointTimestamp, CheckpointOptions checkpointOptions);
+	CompletableFuture<Acknowledge> triggerCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointID, long checkpointTimestamp, CheckpointOptions checkpointOptions);
 
 	/**
 	 * Confirm a checkpoint for the given task. The checkpoint is identified by the checkpoint ID
@@ -113,7 +110,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param checkpointTimestamp is the timestamp when the checkpoint has been initiated
 	 * @return Future acknowledge if the checkpoint has been successfully confirmed
 	 */
-	Future<Acknowledge> confirmCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointId, long checkpointTimestamp);
+	CompletableFuture<Acknowledge> confirmCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointId, long checkpointTimestamp);
 
 	/**
 	 * Stop the given task.
@@ -122,7 +119,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param timeout for the stop operation
 	 * @return Future acknowledge if the task is successfully stopped
 	 */
-	Future<Acknowledge> stopTask(ExecutionAttemptID executionAttemptID, @RpcTimeout Time timeout);
+	CompletableFuture<Acknowledge> stopTask(ExecutionAttemptID executionAttemptID, @RpcTimeout Time timeout);
 
 	/**
 	 * Cancel the given task.
@@ -131,7 +128,7 @@ public interface TaskExecutorGateway extends RpcGateway {
 	 * @param timeout for the cancel operation
 	 * @return Future acknowledge if the task is successfully canceled
 	 */
-	Future<Acknowledge> cancelTask(ExecutionAttemptID executionAttemptID, @RpcTimeout Time timeout);
+	CompletableFuture<Acknowledge> cancelTask(ExecutionAttemptID executionAttemptID, @RpcTimeout Time timeout);
 
 	/**
 	 * Heartbeat request from the job manager

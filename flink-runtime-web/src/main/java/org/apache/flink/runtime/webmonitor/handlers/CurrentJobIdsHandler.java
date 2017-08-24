@@ -18,17 +18,17 @@
 
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.messages.webmonitor.JobsWithIDsOverview;
-import org.apache.flink.runtime.messages.webmonitor.RequestJobsWithIDsOverview;
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.FiniteDuration;
+
+import com.fasterxml.jackson.core.JsonGenerator;
 
 import java.io.StringWriter;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static java.util.Objects.requireNonNull;
 
@@ -41,9 +41,9 @@ public class CurrentJobIdsHandler extends AbstractJsonRequestHandler {
 
 	private static final String CURRENT_JOB_IDS_REST_PATH = "/jobs";
 
-	private final FiniteDuration timeout;
-	
-	public CurrentJobIdsHandler(FiniteDuration timeout) {
+	private final Time timeout;
+
+	public CurrentJobIdsHandler(Time timeout) {
 		this.timeout = requireNonNull(timeout);
 	}
 
@@ -51,46 +51,46 @@ public class CurrentJobIdsHandler extends AbstractJsonRequestHandler {
 	public String[] getPaths() {
 		return new String[]{CURRENT_JOB_IDS_REST_PATH};
 	}
-	
+
 	@Override
-	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, ActorGateway jobManager) throws Exception {
+	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, JobManagerGateway jobManagerGateway) throws Exception {
 		// we need no parameters, get all requests
 		try {
-			if (jobManager != null) {
-				Future<Object> future = jobManager.ask(RequestJobsWithIDsOverview.getInstance(), timeout);
-				JobsWithIDsOverview overview = (JobsWithIDsOverview) Await.result(future, timeout);
-	
+			if (jobManagerGateway != null) {
+				CompletableFuture<JobsWithIDsOverview> overviewFuture = jobManagerGateway.requestJobsOverview(timeout);
+				JobsWithIDsOverview overview = overviewFuture.get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+
 				StringWriter writer = new StringWriter();
-				JsonGenerator gen = JsonFactory.jacksonFactory.createGenerator(writer);
-	
+				JsonGenerator gen = JsonFactory.JACKSON_FACTORY.createGenerator(writer);
+
 				gen.writeStartObject();
-	
+
 				gen.writeArrayFieldStart("jobs-running");
 				for (JobID jid : overview.getJobsRunningOrPending()) {
 					gen.writeString(jid.toString());
 				}
 				gen.writeEndArray();
-	
+
 				gen.writeArrayFieldStart("jobs-finished");
 				for (JobID jid : overview.getJobsFinished()) {
 					gen.writeString(jid.toString());
 				}
 				gen.writeEndArray();
-	
+
 				gen.writeArrayFieldStart("jobs-cancelled");
 				for (JobID jid : overview.getJobsCancelled()) {
 					gen.writeString(jid.toString());
 				}
 				gen.writeEndArray();
-	
+
 				gen.writeArrayFieldStart("jobs-failed");
 				for (JobID jid : overview.getJobsFailed()) {
 					gen.writeString(jid.toString());
 				}
 				gen.writeEndArray();
-	
+
 				gen.writeEndObject();
-	
+
 				gen.close();
 				return writer.toString();
 			}

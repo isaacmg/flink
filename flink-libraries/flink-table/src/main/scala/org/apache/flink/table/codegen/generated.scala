@@ -30,12 +30,16 @@ import org.apache.flink.api.common.typeinfo.TypeInformation
   * @param nullTerm boolean term that indicates if expression is null
   * @param code code necessary to produce resultTerm and nullTerm
   * @param resultType type of the resultTerm
+  * @param literal flag to indicate a constant expression do not reference input and can thus
+  *                 be used in the member area (e.g. as constructor parameter of a reusable
+  *                 instance)
   */
 case class GeneratedExpression(
-    resultTerm: String,
-    nullTerm: String,
-    code: String,
-    resultType: TypeInformation[_])
+  resultTerm: String,
+  nullTerm: String,
+  code: String,
+  resultType: TypeInformation[_],
+  literal: Boolean = false)
 
 object GeneratedExpression {
   val ALWAYS_NULL = "true"
@@ -56,6 +60,16 @@ case class GeneratedFunction[F <: Function, T <: Any](
   name: String,
   returnType: TypeInformation[T],
   code: String)
+
+/**
+  * Describes a generated aggregate helper function
+  *
+  * @param name class name of the generated Function.
+  * @param code code of the generated Function.
+  */
+case class GeneratedAggregationsFunction(
+    name: String,
+    code: String)
 
 /**
   * Describes a generated [[InputFormat]].

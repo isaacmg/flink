@@ -19,7 +19,6 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
@@ -33,15 +32,16 @@ import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.SubtaskState;
+import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
+import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.KeyGroupsStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
@@ -62,12 +62,10 @@ import org.apache.flink.util.FutureUtil;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
-
 import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-
 import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PowerMockIgnore;
 import org.powermock.core.classloader.annotations.PrepareForTest;
@@ -78,6 +76,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -85,7 +84,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
@@ -141,6 +140,7 @@ public class RocksDBAsyncSnapshotTest {
 		streamConfig.setStateBackend(backend);
 
 		streamConfig.setStreamOperator(new AsyncCheckpointOperator());
+		streamConfig.setOperatorID(new OperatorID());
 
 		final OneShotLatch delayCheckpointLatch = new OneShotLatch();
 		final OneShotLatch ensureCheckpointLatch = new OneShotLatch();
@@ -156,7 +156,7 @@ public class RocksDBAsyncSnapshotTest {
 			public void acknowledgeCheckpoint(
 					long checkpointId,
 					CheckpointMetrics checkpointMetrics,
-					SubtaskState checkpointStateHandles) {
+					TaskStateSnapshot checkpointStateHandles) {
 
 				super.acknowledgeCheckpoint(checkpointId, checkpointMetrics);
 
@@ -168,8 +168,16 @@ public class RocksDBAsyncSnapshotTest {
 					throw new RuntimeException(e);
 				}
 
+				boolean hasManagedKeyedState = false;
+				for (Map.Entry<OperatorID, OperatorSubtaskState> entry : checkpointStateHandles.getSubtaskStateMappings()) {
+					OperatorSubtaskState state = entry.getValue();
+					if (state != null) {
+						hasManagedKeyedState |= state.getManagedKeyedState() != null;
+					}
+				}
+
 				// should be one k/v state
-				assertNotNull(checkpointStateHandles.getManagedKeyedState());
+				assertTrue(hasManagedKeyedState);
 
 				// we now know that the checkpoint went through
 				ensureCheckpointLatch.trigger();
@@ -245,6 +253,7 @@ public class RocksDBAsyncSnapshotTest {
 		streamConfig.setStateBackend(backend);
 
 		streamConfig.setStreamOperator(new AsyncCheckpointOperator());
+		streamConfig.setOperatorID(new OperatorID());
 
 		StreamMockEnvironment mockEnv = new StreamMockEnvironment(
 				testHarness.jobConfig,
@@ -338,6 +347,8 @@ public class RocksDBAsyncSnapshotTest {
 			new KeyGroupRange(0, 0),
 			null);
 
+		keyedStateBackend.restore(null);
+
 		// register a state so that the state backend has to checkpoint something
 		keyedStateBackend.getPartitionedState(
 			"namespace",
@@ -360,19 +371,21 @@ public class RocksDBAsyncSnapshotTest {
 	@Test
 	public void testConsistentSnapshotSerializationFlagsAndMasks() {
 
-		Assert.assertEquals(0xFFFF, RocksDBKeyedStateBackend.RocksDBSnapshotOperation.END_OF_KEY_GROUP_MARK);
-		Assert.assertEquals(0x80, RocksDBKeyedStateBackend.RocksDBSnapshotOperation.FIRST_BIT_IN_BYTE_MASK);
+		Assert.assertEquals(0xFFFF, RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.END_OF_KEY_GROUP_MARK);
+		Assert.assertEquals(0x80, RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.FIRST_BIT_IN_BYTE_MASK);
 
 		byte[] expectedKey = new byte[] {42, 42};
 		byte[] modKey = expectedKey.clone();
 
-		Assert.assertFalse(RocksDBKeyedStateBackend.RocksDBSnapshotOperation.hasMetaDataFollowsFlag(modKey));
+		Assert.assertFalse(
+			RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.hasMetaDataFollowsFlag(modKey));
 
-		RocksDBKeyedStateBackend.RocksDBSnapshotOperation.setMetaDataFollowsFlagInKey(modKey);
-		Assert.assertTrue(RocksDBKeyedStateBackend.RocksDBSnapshotOperation.hasMetaDataFollowsFlag(modKey));
+		RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.setMetaDataFollowsFlagInKey(modKey);
+		Assert.assertTrue(RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.hasMetaDataFollowsFlag(modKey));
 
-		RocksDBKeyedStateBackend.RocksDBSnapshotOperation.clearMetaDataFollowsFlag(modKey);
-		Assert.assertFalse(RocksDBKeyedStateBackend.RocksDBSnapshotOperation.hasMetaDataFollowsFlag(modKey));
+		RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.clearMetaDataFollowsFlag(modKey);
+		Assert.assertFalse(
+			RocksDBKeyedStateBackend.RocksDBFullSnapshotOperation.hasMetaDataFollowsFlag(modKey));
 
 		Assert.assertTrue(Arrays.equals(expectedKey, modKey));
 	}
@@ -405,7 +418,7 @@ public class RocksDBAsyncSnapshotTest {
 							} catch (InterruptedException e) {
 								Thread.currentThread().interrupt();
 							}
-							if(closed) {
+							if (closed) {
 								throw new IOException("Stream closed.");
 							}
 							super.write(b);
@@ -419,7 +432,7 @@ public class RocksDBAsyncSnapshotTest {
 							} catch (InterruptedException e) {
 								Thread.currentThread().interrupt();
 							}
-							if(closed) {
+							if (closed) {
 								throw new IOException("Stream closed.");
 							}
 							super.write(b, off, len);
@@ -436,7 +449,7 @@ public class RocksDBAsyncSnapshotTest {
 		}
 	}
 
-	public static class AsyncCheckpointOperator
+	private static class AsyncCheckpointOperator
 		extends AbstractStreamOperator<String>
 		implements OneInputStreamOperator<String, String>, StreamCheckpointedOperator {
 
@@ -476,10 +489,5 @@ public class RocksDBAsyncSnapshotTest {
 			// do nothing so that we don't block
 		}
 
-	}
-
-	public static class DummyMapFunction<T> implements MapFunction<T, T> {
-		@Override
-		public T map(T value) { return value; }
 	}
 }

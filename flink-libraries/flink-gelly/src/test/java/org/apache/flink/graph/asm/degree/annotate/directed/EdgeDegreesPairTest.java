@@ -29,10 +29,14 @@ import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link EdgeDegreesPair}.
+ */
 public class EdgeDegreesPairTest
 extends AsmTestBase {
 
@@ -49,7 +53,7 @@ extends AsmTestBase {
 			"(5,3,((null),(1,1,0),(4,2,2)))";
 
 		DataSet<Edge<IntValue, Tuple3<NullValue, Degrees, Degrees>>> degreesPair = directedSimpleGraph
-			.run(new EdgeDegreesPair<IntValue, NullValue, NullValue>());
+			.run(new EdgeDegreesPair<>());
 
 		TestBaseUtils.compareResultAsText(degreesPair.collect(), expectedResult);
 	}
@@ -57,8 +61,8 @@ extends AsmTestBase {
 	@Test
 	public void testWithRMatGraph()
 			throws Exception {
-		DataSet<Edge<LongValue, Tuple3<NullValue, Degrees, Degrees>>> degreesPair = directedRMatGraph
-			.run(new EdgeDegreesPair<LongValue, NullValue, NullValue>());
+		DataSet<Edge<LongValue, Tuple3<NullValue, Degrees, Degrees>>> degreesPair = directedRMatGraph(10, 16)
+			.run(new EdgeDegreesPair<>());
 
 		Checksum checksum = new ChecksumHashCode<Edge<LongValue, Tuple3<NullValue, Degrees, Degrees>>>()
 			.run(degreesPair)

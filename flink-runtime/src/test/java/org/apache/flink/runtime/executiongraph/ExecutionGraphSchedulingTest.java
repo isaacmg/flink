@@ -26,8 +26,6 @@ import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.executiongraph.restart.NoRestartStrategy;
 import org.apache.flink.runtime.instance.SimpleSlot;
@@ -52,15 +50,16 @@ import org.junit.After;
 import org.junit.Test;
 
 import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 import org.mockito.verification.Timeout;
 
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
@@ -109,8 +108,8 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		final JobID jobId = new JobID();
 		final JobGraph jobGraph = new JobGraph(jobId, "test", sourceVertex, targetVertex);
 
-		final FlinkCompletableFuture<SimpleSlot> sourceFuture = new FlinkCompletableFuture<>();
-		final FlinkCompletableFuture<SimpleSlot> targetFuture = new FlinkCompletableFuture<>();
+		final CompletableFuture<SimpleSlot> sourceFuture = new CompletableFuture<>();
+		final CompletableFuture<SimpleSlot> targetFuture = new CompletableFuture<>();
 
 		ProgrammedSlotProvider slotProvider = new ProgrammedSlotProvider(parallelism);
 		slotProvider.addSlot(sourceVertex.getID(), 0, sourceFuture);
@@ -177,9 +176,9 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		final JobGraph jobGraph = new JobGraph(jobId, "test", sourceVertex, targetVertex);
 
 		@SuppressWarnings({"unchecked", "rawtypes"})
-		final FlinkCompletableFuture<SimpleSlot>[] sourceFutures = new FlinkCompletableFuture[parallelism];
+		final CompletableFuture<SimpleSlot>[] sourceFutures = new CompletableFuture[parallelism];
 		@SuppressWarnings({"unchecked", "rawtypes"})
-		final FlinkCompletableFuture<SimpleSlot>[] targetFutures = new FlinkCompletableFuture[parallelism];
+		final CompletableFuture<SimpleSlot>[] targetFutures = new CompletableFuture[parallelism];
 
 		//
 		//  Create the slots, futures, and the slot provider
@@ -197,8 +196,8 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 			sourceSlots[i] = createSlot(sourceTaskManagers[i], jobId);
 			targetSlots[i] = createSlot(targetTaskManagers[i], jobId);
 
-			sourceFutures[i] = new FlinkCompletableFuture<>();
-			targetFutures[i] = new FlinkCompletableFuture<>();
+			sourceFutures[i] = new CompletableFuture<>();
+			targetFutures[i] = new CompletableFuture<>();
 		}
 
 		ProgrammedSlotProvider slotProvider = new ProgrammedSlotProvider(parallelism);
@@ -242,10 +241,10 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		//  verify that all deployments have happened
 
 		for (TaskManagerGateway gateway : sourceTaskManagers) {
-			verify(gateway, timeout(50)).submitTask(any(TaskDeploymentDescriptor.class), any(Time.class));
+			verify(gateway, timeout(500L)).submitTask(any(TaskDeploymentDescriptor.class), any(Time.class));
 		}
 		for (TaskManagerGateway gateway : targetTaskManagers) {
-			verify(gateway, timeout(50)).submitTask(any(TaskDeploymentDescriptor.class), any(Time.class));
+			verify(gateway, timeout(500L)).submitTask(any(TaskDeploymentDescriptor.class), any(Time.class));
 		}
 	}
 
@@ -283,16 +282,16 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		final SimpleSlot[] targetSlots = new SimpleSlot[parallelism];
 
 		@SuppressWarnings({"unchecked", "rawtypes"})
-		final FlinkCompletableFuture<SimpleSlot>[] sourceFutures = new FlinkCompletableFuture[parallelism];
+		final CompletableFuture<SimpleSlot>[] sourceFutures = new CompletableFuture[parallelism];
 		@SuppressWarnings({"unchecked", "rawtypes"})
-		final FlinkCompletableFuture<SimpleSlot>[] targetFutures = new FlinkCompletableFuture[parallelism];
+		final CompletableFuture<SimpleSlot>[] targetFutures = new CompletableFuture[parallelism];
 
 		for (int i = 0; i < parallelism; i++) {
 			sourceSlots[i] = createSlot(taskManager, jobId, slotOwner);
 			targetSlots[i] = createSlot(taskManager, jobId, slotOwner);
 
-			sourceFutures[i] = new FlinkCompletableFuture<>();
-			targetFutures[i] = new FlinkCompletableFuture<>();
+			sourceFutures[i] = new CompletableFuture<>();
+			targetFutures[i] = new CompletableFuture<>();
 		}
 
 		ProgrammedSlotProvider slotProvider = new ProgrammedSlotProvider(parallelism);
@@ -300,8 +299,6 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		slotProvider.addSlots(targetVertex.getID(), targetFutures);
 
 		final ExecutionGraph eg = createExecutionGraph(jobGraph, slotProvider);
-		TerminalJobStatusListener testListener = new TerminalJobStatusListener();
-		eg.registerJobStatusListener(testListener);
 
 		//
 		//  we complete some of the futures
@@ -322,7 +319,7 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		sourceFutures[1].completeExceptionally(new TestRuntimeException());
 
 		// wait until the job failed as a whole
-		testListener.waitForTerminalState(2000);
+		eg.getTerminationFuture().get(2000, TimeUnit.MILLISECONDS);
 
 		// wait until all slots are back
 		verify(slotOwner, new Timeout(2000, times(6))).returnAllocatedSlot(any(Slot.class));
@@ -360,19 +357,17 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		final TaskManagerGateway taskManager = mock(TaskManagerGateway.class);
 		final SimpleSlot[] slots = new SimpleSlot[parallelism];
 		@SuppressWarnings({"unchecked", "rawtypes"})
-		final FlinkCompletableFuture<SimpleSlot>[] slotFutures = new FlinkCompletableFuture[parallelism];
+		final CompletableFuture<SimpleSlot>[] slotFutures = new CompletableFuture[parallelism];
 
 		for (int i = 0; i < parallelism; i++) {
 			slots[i] = createSlot(taskManager, jobId, slotOwner);
-			slotFutures[i] = new FlinkCompletableFuture<>();
+			slotFutures[i] = new CompletableFuture<>();
 		}
 
 		ProgrammedSlotProvider slotProvider = new ProgrammedSlotProvider(parallelism);
 		slotProvider.addSlots(vertex.getID(), slotFutures);
 
 		final ExecutionGraph eg = createExecutionGraph(jobGraph, slotProvider, Time.milliseconds(20));
-		final TerminalJobStatusListener statusListener = new TerminalJobStatusListener();
-		eg.registerJobStatusListener(statusListener);
 
 		//  we complete one future
 		slotFutures[1].complete(slots[1]);
@@ -388,7 +383,7 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 
 		// since future[0] is still missing the while operation must time out
 		// we have no restarts allowed, so the job will go terminal
-		statusListener.waitForTerminalState(2000);
+		eg.getTerminationFuture().get(2000, TimeUnit.MILLISECONDS);
 
 		// wait until all slots are back
 		verify(slotOwner, new Timeout(2000, times(2))).returnAllocatedSlot(any(Slot.class));
@@ -396,7 +391,7 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		//  verify that no deployments have happened
 		verify(taskManager, times(0)).submitTask(any(TaskDeploymentDescriptor.class), any(Time.class));
 
-		for (Future<SimpleSlot> future : slotFutures) {
+		for (CompletableFuture<SimpleSlot> future : slotFutures) {
 			if (future.isDone()) {
 				assertTrue(future.get().isCanceled());
 			}
@@ -438,17 +433,13 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 			createSlot(taskManager, jobId, recycler)));
 
 		when(slotProvider.allocateSlot(any(ScheduledUnit.class), anyBoolean())).then(
-			new Answer<Future<SimpleSlot>>() {
-
-				@Override
-				public Future<SimpleSlot> answer(InvocationOnMock invocation) {
+			(InvocationOnMock invocation) -> {
 					if (availableSlots.isEmpty()) {
 						throw new TestRuntimeException();
 					} else {
-						return FlinkCompletableFuture.completed(availableSlots.remove(0));
+						return CompletableFuture.completedFuture(availableSlots.remove(0));
 					}
-				}
-			});
+				});
 
 		final ExecutionGraph eg = createExecutionGraph(jobGraph, slotProvider);
 		final ExecutionJobVertex ejv = eg.getJobVertex(vertex.getID());
@@ -516,17 +507,13 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 		final SlotProvider slotProvider = mock(SlotProvider.class);
 
 		when(slotProvider.allocateSlot(any(ScheduledUnit.class), anyBoolean())).then(
-			new Answer<Future<SimpleSlot>>() {
-
-				@Override
-				public Future<SimpleSlot> answer(InvocationOnMock invocation) {
+			(InvocationOnMock invocation) -> {
 					if (availableSlots.isEmpty()) {
 						throw new TestRuntimeException();
 					} else {
-						return FlinkCompletableFuture.completed(availableSlots.remove(0));
+						return CompletableFuture.completedFuture(availableSlots.remove(0));
 					}
-				}
-			});
+				});
 
 		final ExecutionGraph eg = createExecutionGraph(jobGraph, slotProvider);
 
@@ -588,7 +575,7 @@ public class ExecutionGraphSchedulingTest extends TestLogger {
 	private static TaskManagerGateway createTaskManager() {
 		TaskManagerGateway tm = mock(TaskManagerGateway.class);
 		when(tm.submitTask(any(TaskDeploymentDescriptor.class), any(Time.class)))
-				.thenReturn(FlinkCompletableFuture.completed(Acknowledge.get()));
+				.thenReturn(CompletableFuture.completedFuture(Acknowledge.get()));
 
 		return tm;
 	}

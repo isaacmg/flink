@@ -15,6 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.api.operators;
 
 import org.apache.flink.annotation.PublicEvolving;
@@ -48,7 +49,7 @@ public interface Output<T> extends Collector<T> {
 	 *
 	 * @param record The record to collect.
 	 */
-	<X> void collect(OutputTag<?> outputTag, StreamRecord<X> record);
+	<X> void collect(OutputTag<X> outputTag, StreamRecord<X> record);
 
 	void emitLatencyMarker(LatencyMarker latencyMarker);
 }

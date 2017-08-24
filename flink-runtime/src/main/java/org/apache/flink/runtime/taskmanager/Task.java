@@ -27,15 +27,18 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.fs.FileSystemSafetyNet;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.fs.SafetyNetCloseableRegistry;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.accumulators.AccumulatorRegistry;
+import org.apache.flink.runtime.blob.BlobCache;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.checkpoint.decline.CheckpointDeclineTaskNotCheckpointingException;
 import org.apache.flink.runtime.checkpoint.decline.CheckpointDeclineTaskNotReadyException;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
-import org.apache.flink.runtime.concurrent.BiFunction;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
 import org.apache.flink.runtime.execution.CancelTaskException;
@@ -53,6 +56,8 @@ import org.apache.flink.runtime.io.network.netty.PartitionProducerStateChecker;
 import org.apache.flink.runtime.io.network.partition.ResultPartition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionMetrics;
+import org.apache.flink.runtime.io.network.partition.consumer.InputGateMetrics;
 import org.apache.flink.runtime.io.network.partition.consumer.SingleInputGate;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -64,20 +69,24 @@ import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
-import org.apache.flink.runtime.state.TaskStateHandles;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedValue;
+import org.apache.flink.util.WrappingRuntimeException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+
 import java.io.IOException;
 import java.net.URL;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -195,7 +204,10 @@ public class Task implements Runnable, TaskActions {
 	/** All listener that want to be notified about changes in the task's execution state */
 	private final List<TaskExecutionStateListener> taskExecutionStateListeners;
 
-	/** The library cache, from which the task can request its required JAR files */
+	/** The BLOB cache, from which the task can request BLOB files */
+	private final BlobCache blobCache;
+
+	/** The library cache, from which the task can request its class loader */
 	private final LibraryCacheManager libraryCache;
 
 	/** The cache for user-defined files that the invokable requires */
@@ -244,7 +256,7 @@ public class Task implements Runnable, TaskActions {
 	 * The handles to the states that the task was initialized with. Will be set
 	 * to null after the initialization, to be memory friendly.
 	 */
-	private volatile TaskStateHandles taskStateHandles;
+	private volatile TaskStateSnapshot taskStateHandles;
 
 	/** Initialized from the Flink configuration. May also be set at the ExecutionConfig */
 	private long taskCancellationInterval;
@@ -266,7 +278,7 @@ public class Task implements Runnable, TaskActions {
 		Collection<ResultPartitionDeploymentDescriptor> resultPartitionDeploymentDescriptors,
 		Collection<InputGateDeploymentDescriptor> inputGateDeploymentDescriptors,
 		int targetSlotNumber,
-		TaskStateHandles taskStateHandles,
+		TaskStateSnapshot taskStateHandles,
 		MemoryManager memManager,
 		IOManager ioManager,
 		NetworkEnvironment networkEnvironment,
@@ -274,10 +286,11 @@ public class Task implements Runnable, TaskActions {
 		TaskManagerActions taskManagerActions,
 		InputSplitProvider inputSplitProvider,
 		CheckpointResponder checkpointResponder,
+		BlobCache blobCache,
 		LibraryCacheManager libraryCache,
 		FileCache fileCache,
 		TaskManagerRuntimeInfo taskManagerConfig,
-		TaskMetricGroup metricGroup,
+		@Nonnull TaskMetricGroup metricGroup,
 		ResultPartitionConsumableNotifier resultPartitionConsumableNotifier,
 		PartitionProducerStateChecker partitionProducerStateChecker,
 		Executor executor) {
@@ -322,6 +335,7 @@ public class Task implements Runnable, TaskActions {
 		this.checkpointResponder = Preconditions.checkNotNull(checkpointResponder);
 		this.taskManagerActions = checkNotNull(taskManagerActions);
 
+		this.blobCache = Preconditions.checkNotNull(blobCache);
 		this.libraryCache = Preconditions.checkNotNull(libraryCache);
 		this.fileCache = Preconditions.checkNotNull(fileCache);
 		this.network = Preconditions.checkNotNull(networkEnvironment);
@@ -390,11 +404,6 @@ public class Task implements Runnable, TaskActions {
 
 		// finally, create the executing thread, but do not start it
 		executingThread = new Thread(TASK_THREADS_GROUP, this, taskNameWithSubtask);
-
-		if (this.metrics != null && this.metrics.getIOMetricGroup() != null) {
-			// add metrics for buffers
-			this.metrics.getIOMetricGroup().initializeBufferMetrics(this);
-		}
 	}
 
 	// ------------------------------------------------------------------------
@@ -507,7 +516,7 @@ public class Task implements Runnable, TaskActions {
 	}
 
 	/**
-	 * The core work method that bootstraps the task and executes it code
+	 * The core work method that bootstraps the task and executes its code
 	 */
 	@Override
 	public void run() {
@@ -526,16 +535,25 @@ public class Task implements Runnable, TaskActions {
 			else if (current == ExecutionState.FAILED) {
 				// we were immediately failed. tell the TaskManager that we reached our final state
 				notifyFinalState();
+				if (metrics != null) {
+					metrics.close();
+				}
 				return;
 			}
 			else if (current == ExecutionState.CANCELING) {
 				if (transitionState(ExecutionState.CANCELING, ExecutionState.CANCELED)) {
 					// we were immediately canceled. tell the TaskManager that we reached our final state
 					notifyFinalState();
+					if (metrics != null) {
+						metrics.close();
+					}
 					return;
 				}
 			}
 			else {
+				if (metrics != null) {
+					metrics.close();
+				}
 				throw new IllegalStateException("Invalid state for beginning of operation of task " + this + '.');
 			}
 		}
@@ -555,6 +573,8 @@ public class Task implements Runnable, TaskActions {
 			// activate safety net for task thread
 			LOG.info("Creating FileSystem stream leak safety net for task {}", this);
 			FileSystemSafetyNet.initializeSafetyNetForThread();
+
+			blobCache.registerJob(jobId);
 
 			// first of all, get a user-code classloader
 			// this may involve downloading the job's JAR files and/or classes
@@ -590,6 +610,28 @@ public class Task implements Runnable, TaskActions {
 			LOG.info("Registering task at network: {}.", this);
 
 			network.registerTask(this);
+
+			// add metrics for buffers
+			this.metrics.getIOMetricGroup().initializeBufferMetrics(this);
+
+			// register detailed network metrics, if configured
+			if (taskManagerConfig.getConfiguration().getBoolean(TaskManagerOptions.NETWORK_DETAILED_METRICS)) {
+				// similar to MetricUtils.instantiateNetworkMetrics() but inside this IOMetricGroup
+				MetricGroup networkGroup = this.metrics.getIOMetricGroup().addGroup("Network");
+				MetricGroup outputGroup = networkGroup.addGroup("Output");
+				MetricGroup inputGroup = networkGroup.addGroup("Input");
+
+				// output metrics
+				for (int i = 0; i < producedPartitions.length; i++) {
+					ResultPartitionMetrics.registerQueueLengthMetrics(
+						outputGroup.addGroup(i), producedPartitions[i]);
+				}
+
+				for (int i = 0; i < inputGates.length; i++) {
+					InputGateMetrics.registerQueueLengthMetrics(
+						inputGroup.addGroup(i), inputGates[i]);
+				}
+			}
 
 			// next, kick off the background copying of files for the distributed cache
 			try {
@@ -697,6 +739,11 @@ public class Task implements Runnable, TaskActions {
 		}
 		catch (Throwable t) {
 
+			// unwrap wrapped exceptions to make stack traces more compact
+			if (t instanceof WrappingRuntimeException) {
+				t = ((WrappingRuntimeException) t).unwrap();
+			}
+
 			// ----------------------------------------------------------------
 			// the execution failed. either the invokable code properly failed, or
 			// an exception was thrown as a side effect of cancelling
@@ -788,6 +835,7 @@ public class Task implements Runnable, TaskActions {
 
 				// remove all of the tasks library resources
 				libraryCache.unregisterTask(jobId, executionId);
+				blobCache.releaseJob(jobId);
 
 				// remove all files in the distributed cache
 				removeCachedFiles(distributedCacheEntries, fileCache);
@@ -823,7 +871,7 @@ public class Task implements Runnable, TaskActions {
 		// triggers the download of all missing jar files from the job manager
 		libraryCache.registerTask(jobId, executionId, requiredJarFiles, requiredClasspaths);
 
-		LOG.debug("Register task {} at library cache manager took {} milliseconds",
+		LOG.debug("Getting user code class loader for task {} at library cache manager took {} milliseconds",
 				executionId, System.currentTimeMillis() - startDownloadTime);
 
 		ClassLoader userCodeClassLoader = libraryCache.getClassLoader(jobId);
@@ -1072,15 +1120,14 @@ public class Task implements Runnable, TaskActions {
 		final IntermediateDataSetID intermediateDataSetId,
 		final ResultPartitionID resultPartitionId) {
 
-		org.apache.flink.runtime.concurrent.Future<ExecutionState> futurePartitionState =
+		CompletableFuture<ExecutionState> futurePartitionState =
 			partitionProducerStateChecker.requestPartitionProducerState(
 				jobId,
 				intermediateDataSetId,
 				resultPartitionId);
 
-		futurePartitionState.handleAsync(new BiFunction<ExecutionState, Throwable, Void>() {
-			@Override
-			public Void apply(ExecutionState executionState, Throwable throwable) {
+		futurePartitionState.whenCompleteAsync(
+			(ExecutionState executionState, Throwable throwable) -> {
 				try {
 					if (executionState != null) {
 						onPartitionStateUpdate(
@@ -1104,10 +1151,8 @@ public class Task implements Runnable, TaskActions {
 				} catch (IOException | InterruptedException e) {
 					failExternally(e);
 				}
-
-				return null;
-			}
-		}, executor);
+			},
+			executor);
 	}
 
 	// ------------------------------------------------------------------------
@@ -1135,13 +1180,14 @@ public class Task implements Runnable, TaskActions {
 				// build a local closure
 				final StatefulTask statefulTask = (StatefulTask) invokable;
 				final String taskName = taskNameWithSubtask;
-
+				final SafetyNetCloseableRegistry safetyNetCloseableRegistry =
+					FileSystemSafetyNet.getSafetyNetCloseableRegistryForThread();
 				Runnable runnable = new Runnable() {
 					@Override
 					public void run() {
-						// activate safety net for checkpointing thread
+						// set safety net from the task's context for checkpointing thread
 						LOG.debug("Creating FileSystem stream leak safety net for {}", Thread.currentThread().getName());
-						FileSystemSafetyNet.initializeSafetyNetForThread();
+						FileSystemSafetyNet.setSafetyNetCloseableRegistryForThread(safetyNetCloseableRegistry);
 
 						try {
 							boolean success = statefulTask.triggerCheckpoint(checkpointMetaData, checkpointOptions);
@@ -1162,11 +1208,7 @@ public class Task implements Runnable, TaskActions {
 									taskNameWithSubtask, executionId, t);
 							}
 						} finally {
-							// close and de-activate safety net for checkpointing thread
-							LOG.debug("Ensuring all FileSystem streams are closed for {}",
-									Thread.currentThread().getName());
-
-							FileSystemSafetyNet.closeSafetyNetAndGuardedResourcesForThread();
+							FileSystemSafetyNet.setSafetyNetCloseableRegistryForThread(null);
 						}
 					}
 				};

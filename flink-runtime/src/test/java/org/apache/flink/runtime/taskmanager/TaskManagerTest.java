@@ -35,8 +35,6 @@ import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.akka.FlinkUntypedActor;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
-import org.apache.flink.runtime.concurrent.CompletableFuture;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
 import org.apache.flink.runtime.deployment.InputChannelDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
@@ -47,6 +45,7 @@ import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.JobInformation;
 import org.apache.flink.runtime.executiongraph.TaskInformation;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
 import org.apache.flink.runtime.instance.ActorGateway;
 import org.apache.flink.runtime.instance.AkkaActorGateway;
 import org.apache.flink.runtime.instance.InstanceID;
@@ -60,6 +59,8 @@ import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.Tasks;
+import org.apache.flink.runtime.leaderelection.TestingLeaderRetrievalService;
+import org.apache.flink.runtime.leaderretrieval.StandaloneLeaderRetrievalService;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.RegistrationMessages;
 import org.apache.flink.runtime.messages.StackTraceSampleMessages.TriggerStackTraceSample;
@@ -80,8 +81,10 @@ import org.apache.flink.types.IntValue;
 import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.TestLogger;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -105,6 +108,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.runtime.messages.JobManagerMessages.RequestPartitionProducerState;
@@ -126,7 +130,9 @@ public class TaskManagerTest extends TestLogger {
 
 	private static ActorSystem system;
 
-	final static UUID leaderSessionID = HighAvailabilityServices.DEFAULT_LEADER_ID;
+	final static UUID leaderSessionID = UUID.randomUUID();
+
+	private TestingHighAvailabilityServices highAvailabilityServices;
 
 	@BeforeClass
 	public static void setup() {
@@ -138,20 +144,39 @@ public class TaskManagerTest extends TestLogger {
 		JavaTestKit.shutdownActorSystem(system);
 	}
 
+	@Before
+	public void setupTest() {
+		highAvailabilityServices = new TestingHighAvailabilityServices();
+	}
+
+	@After
+	public void tearDownTest() throws Exception {
+		if (highAvailabilityServices != null) {
+			highAvailabilityServices.closeAndCleanupAllData();
+
+			highAvailabilityServices = null;
+		}
+	}
+
 	@Test
 	public void testSubmitAndExecuteTask() throws IOException {
 		new JavaTestKit(system){{
 
 			ActorGateway taskManager = null;
 			final ActorGateway jobManager = TestingUtils.createForwardingActor(
-					system,
-					getTestActor(),
-					Option.<String>empty());
+				system,
+				getTestActor(),
+				HighAvailabilityServices.DEFAULT_LEADER_ID,
+				Option.<String>empty());
+
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
 
 			try {
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						false);
@@ -261,9 +286,13 @@ public class TaskManagerTest extends TestLogger {
 				ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						true);
@@ -398,9 +427,13 @@ public class TaskManagerTest extends TestLogger {
 				ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						true);
@@ -524,9 +557,13 @@ public class TaskManagerTest extends TestLogger {
 				ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						true);
@@ -624,9 +661,13 @@ public class TaskManagerTest extends TestLogger {
 				ActorRef jm = system.actorOf(Props.create(new SimpleLookupJobManagerCreator(leaderSessionID)));
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						true);
@@ -769,9 +810,13 @@ public class TaskManagerTest extends TestLogger {
 
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						true);
@@ -906,6 +951,10 @@ public class TaskManagerTest extends TestLogger {
 
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				final int dataPort = NetUtils.getAvailablePort();
 				Configuration config = new Configuration();
 				config.setInteger(ConfigConstants.TASK_MANAGER_DATA_PORT_KEY, dataPort);
@@ -914,7 +963,7 @@ public class TaskManagerTest extends TestLogger {
 
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						config,
 						false,
 						true);
@@ -997,7 +1046,7 @@ public class TaskManagerTest extends TestLogger {
 		assertEquals(tmConfig.getNetworkConfig().partitionRequestInitialBackoff(), 100);
 		assertEquals(tmConfig.getNetworkConfig().partitionRequestMaxBackoff(), 200);
 		assertEquals(tmConfig.getNetworkConfig().networkBuffersPerChannel(), 10);
-		assertEquals(tmConfig.getNetworkConfig().extraNetworkBuffersPerGate(), 100);
+		assertEquals(tmConfig.getNetworkConfig().floatingNetworkBuffersPerGate(), 100);
 	}
 
 	/**
@@ -1024,13 +1073,17 @@ public class TaskManagerTest extends TestLogger {
 
 				jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				final Configuration config = new Configuration();
 				config.setInteger(TaskManagerOptions.NETWORK_REQUEST_BACKOFF_INITIAL, 100);
 				config.setInteger(TaskManagerOptions.NETWORK_REQUEST_BACKOFF_MAX, 200);
 
 				taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						config,
 						true,
 						true);
@@ -1122,9 +1175,13 @@ public class TaskManagerTest extends TestLogger {
 				config.setInteger(TaskManagerOptions.NETWORK_REQUEST_BACKOFF_MAX, 200);
 				config.setString(ConfigConstants.TASK_MANAGER_LOG_PATH_KEY, "/i/dont/exist");
 
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				taskManager = TestingUtils.createTaskManager(
 					system,
-					jobManager,
+					highAvailabilityServices,
 					config,
 					false,
 					true);
@@ -1166,18 +1223,26 @@ public class TaskManagerTest extends TestLogger {
 
 			// We need this to be a JM that answers to update messages for
 			// robustness on Travis (if jobs need to be resubmitted in (4)).
-			ActorRef jm = system.actorOf(Props.create(new SimpleLookupJobManagerCreator(leaderSessionID)));
-			ActorGateway jobManagerActorGateway = new AkkaActorGateway(jm, leaderSessionID);
+			ActorRef jm = system.actorOf(Props.create(new SimpleLookupJobManagerCreator(
+				HighAvailabilityServices.DEFAULT_LEADER_ID)));
+			ActorGateway jobManagerActorGateway = new AkkaActorGateway(
+				jm,
+				HighAvailabilityServices.DEFAULT_LEADER_ID);
 
 			final ActorGateway testActorGateway = new AkkaActorGateway(
 					getTestActor(),
-					leaderSessionID);
+					HighAvailabilityServices.DEFAULT_LEADER_ID);
 
 			try {
 				final ActorGateway jobManager = jobManagerActorGateway;
+
+				highAvailabilityServices.setJobMasterLeaderRetriever(
+					HighAvailabilityServices.DEFAULT_JOB_ID,
+					new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 				final ActorGateway taskManager = TestingUtils.createTaskManager(
 						system,
-						jobManager,
+						highAvailabilityServices,
 						new Configuration(),
 						true,
 						false);
@@ -1459,11 +1524,15 @@ public class TaskManagerTest extends TestLogger {
 
 	@Test
 	public void testTerminationOnFatalError() {
+		highAvailabilityServices.setJobMasterLeaderRetriever(
+			HighAvailabilityServices.DEFAULT_JOB_ID,
+			new TestingLeaderRetrievalService());
+
 		new JavaTestKit(system){{
 
 			final ActorGateway taskManager = TestingUtils.createTaskManager(
 					system,
-					system.deadLetters(), // no jobmanager
+					highAvailabilityServices, // no jobmanager
 					new Configuration(),
 					true,
 					false);
@@ -1498,7 +1567,7 @@ public class TaskManagerTest extends TestLogger {
 			// set the memory segment to the smallest size possible, because we have to fill one
 			// memory buffer to trigger the schedule or update consumers message to the downstream
 			// operators
-			configuration.setInteger(ConfigConstants.TASK_MANAGER_MEMORY_SEGMENT_SIZE_KEY, 4096);
+			configuration.setInteger(TaskManagerOptions.MEMORY_SEGMENT_SIZE, 4096);
 
 			final JobID jid = new JobID();
 			final JobVertexID vid = new JobVertexID();
@@ -1524,9 +1593,13 @@ public class TaskManagerTest extends TestLogger {
 			ActorRef jmActorRef = system.actorOf(Props.create(FailingScheduleOrUpdateConsumersJobManager.class, leaderSessionID), "jobmanager");
 			ActorGateway jobManager = new AkkaActorGateway(jmActorRef, leaderSessionID);
 
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 			final ActorGateway taskManager = TestingUtils.createTaskManager(
 				system,
-				jobManager,
+				highAvailabilityServices,
 				configuration,
 				true,
 				true);
@@ -1538,7 +1611,7 @@ public class TaskManagerTest extends TestLogger {
 
 				Await.result(result, timeout);
 
-				org.apache.flink.runtime.concurrent.Future<Boolean> cancelFuture = TestInvokableRecordCancel.gotCanceled();
+				CompletableFuture<Boolean> cancelFuture = TestInvokableRecordCancel.gotCanceled();
 
 				assertEquals(true, cancelFuture.get());
 			} finally {
@@ -1562,9 +1635,13 @@ public class TaskManagerTest extends TestLogger {
 			ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 			jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 			taskManager = TestingUtils.createTaskManager(
 				system,
-				jobManager,
+				highAvailabilityServices,
 				new Configuration(),
 				true,
 				true);
@@ -1619,9 +1696,13 @@ public class TaskManagerTest extends TestLogger {
 			ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 			jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 			taskManager = TestingUtils.createTaskManager(
 				system,
-				jobManager,
+				highAvailabilityServices,
 				new Configuration(),
 				true,
 				true);
@@ -1679,9 +1760,13 @@ public class TaskManagerTest extends TestLogger {
 			ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 			jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 			taskManager = TestingUtils.createTaskManager(
 				system,
-				jobManager,
+				highAvailabilityServices,
 				new Configuration(),
 				true,
 				true);
@@ -1724,9 +1809,13 @@ public class TaskManagerTest extends TestLogger {
 			ActorRef jm = system.actorOf(Props.create(SimpleJobManager.class, leaderSessionID));
 			jobManager = new AkkaActorGateway(jm, leaderSessionID);
 
+			highAvailabilityServices.setJobMasterLeaderRetriever(
+				HighAvailabilityServices.DEFAULT_JOB_ID,
+				new StandaloneLeaderRetrievalService(jobManager.path(), jobManager.leaderSessionID()));
+
 			taskManager = TestingUtils.createTaskManager(
 				system,
-				jobManager,
+				highAvailabilityServices,
 				new Configuration(),
 				true,
 				true);
@@ -1980,7 +2069,7 @@ public class TaskManagerTest extends TestLogger {
 	public static final class TestInvokableRecordCancel extends AbstractInvokable {
 
 		private static final Object lock = new Object();
-		private static CompletableFuture<Boolean> gotCanceledFuture = new FlinkCompletableFuture<>();
+		private static CompletableFuture<Boolean> gotCanceledFuture = new CompletableFuture<>();
 
 		@Override
 		public void invoke() throws Exception {
@@ -2009,11 +2098,11 @@ public class TaskManagerTest extends TestLogger {
 
 		public static void resetGotCanceledFuture() {
 			synchronized (lock) {
-				gotCanceledFuture = new FlinkCompletableFuture<>();
+				gotCanceledFuture = new CompletableFuture<>();
 			}
 		}
 
-		public static org.apache.flink.runtime.concurrent.Future<Boolean> gotCanceled() {
+		public static CompletableFuture<Boolean> gotCanceled() {
 			synchronized (lock) {
 				return gotCanceledFuture;
 			}

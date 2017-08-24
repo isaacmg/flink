@@ -22,15 +22,11 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.core.fs.FSDataInputStream;
-import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.blob.BlobClient;
 import org.apache.flink.runtime.blob.BlobKey;
-import org.apache.flink.runtime.instance.ActorGateway;
-import org.apache.flink.runtime.jobgraph.tasks.JobSnapshottingSettings;
+import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.util.SerializedValue;
-import scala.concurrent.duration.FiniteDuration;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -92,7 +88,7 @@ public class JobGraph implements Serializable {
 	private SerializedValue<ExecutionConfig> serializedExecutionConfig;
 
 	/** The settings for the job checkpoints */
-	private JobSnapshottingSettings snapshotSettings;
+	private JobCheckpointingSettings snapshotSettings;
 
 	/** Savepoint restore settings. */
 	private SavepointRestoreSettings savepointRestoreSettings = SavepointRestoreSettings.none();
@@ -331,17 +327,17 @@ public class JobGraph implements Serializable {
 	 *
 	 * @param settings The snapshot settings, or null, to disable snapshotting.
 	 */
-	public void setSnapshotSettings(JobSnapshottingSettings settings) {
+	public void setSnapshotSettings(JobCheckpointingSettings settings) {
 		this.snapshotSettings = settings;
 	}
 
 	/**
 	 * Gets the settings for asynchronous snapshots. This method returns null, when
-	 * snapshotting is not enabled.
+	 * checkpointing is not enabled.
 	 *
-	 * @return The snapshot settings, or null, if snapshotting is not enabled.
+	 * @return The snapshot settings, or null, if checkpointing is not enabled.
 	 */
-	public JobSnapshottingSettings getSnapshotSettings() {
+	public JobCheckpointingSettings getCheckpointingSettings() {
 		return snapshotSettings;
 	}
 
@@ -484,6 +480,15 @@ public class JobGraph implements Serializable {
 	}
 
 	/**
+	 * Gets the list of assigned user jar paths.
+	 *
+	 * @return The list of assigned user jar paths
+	 */
+	public List<Path> getUserJars() {
+		return userJars;
+	}
+
+	/**
 	 * Adds the BLOB referenced by the key to the JobGraph's dependencies.
 	 *
 	 * @param key
@@ -518,65 +523,25 @@ public class JobGraph implements Serializable {
 	}
 
 	/**
-	 * Uploads the previously added user jar file to the job manager through the job manager's BLOB server.
-	 *
-	 * @param serverAddress
-	 *        the network address of the BLOB server
-	 * @param blobClientConfig
-	 *        the blob client configuration
-	 * @throws IOException
-	 *         thrown if an I/O error occurs during the upload
-	 */
-	public void uploadRequiredJarFiles(InetSocketAddress serverAddress,
-			Configuration blobClientConfig) throws IOException {
-		if (this.userJars.isEmpty()) {
-			return;
-		}
-
-		BlobClient bc = null;
-		try {
-			bc = new BlobClient(serverAddress, blobClientConfig);
-
-			for (final Path jar : this.userJars) {
-
-				final FileSystem fs = jar.getFileSystem();
-				FSDataInputStream is = null;
-				try {
-					is = fs.open(jar);
-					final BlobKey key = bc.put(is);
-					this.userJarBlobKeys.add(key);
-				}
-				finally {
-					if (is != null) {
-						is.close();
-					}
-				}
-			}
-		}
-		finally {
-			if (bc != null) {
-				bc.close();
-			}
-		}
-	}
-
-	/**
 	 * Uploads the previously added user JAR files to the job manager through
-	 * the job manager's BLOB server. The respective port is retrieved from the
-	 * JobManager. This function issues a blocking call.
+	 * the job manager's BLOB server. The BLOB servers' address is given as a
+	 * parameter. This function issues a blocking call.
 	 *
-	 * @param jobManager JobManager actor gateway
-	 * @param askTimeout Ask timeout
+	 * @param blobServerAddress of the blob server to upload the jars to
 	 * @param blobClientConfig the blob client configuration
 	 * @throws IOException Thrown, if the file upload to the JobManager failed.
 	 */
-	public void uploadUserJars(ActorGateway jobManager, FiniteDuration askTimeout,
+	public void uploadUserJars(
+			InetSocketAddress blobServerAddress,
 			Configuration blobClientConfig) throws IOException {
-		List<BlobKey> blobKeys = BlobClient.uploadJarFiles(jobManager, askTimeout, blobClientConfig, userJars);
+		if (!userJars.isEmpty()) {
+			// TODO: make use of job-related BLOBs after adapting the BlobLibraryCacheManager
+			List<BlobKey> blobKeys = BlobClient.uploadJarFiles(blobServerAddress, blobClientConfig, jobID, userJars);
 
-		for (BlobKey blobKey : blobKeys) {
-			if (!userJarBlobKeys.contains(blobKey)) {
-				userJarBlobKeys.add(blobKey);
+			for (BlobKey blobKey : blobKeys) {
+				if (!userJarBlobKeys.contains(blobKey)) {
+					userJarBlobKeys.add(blobKey);
+				}
 			}
 		}
 	}

@@ -18,26 +18,41 @@
 
 package org.apache.flink.runtime.blob;
 
+import org.apache.flink.api.common.JobID;
+
+import java.io.Closeable;
+import java.io.File;
 import java.io.IOException;
-import java.net.URL;
 
 /**
  * A simple store and retrieve binary large objects (BLOBs).
  */
-public interface BlobService {
+public interface BlobService extends Closeable {
 
 	/**
-	 * This method returns the URL of the file associated with the provided blob key.
+	 * Returns the path to a local copy of the (job-unrelated) file associated with the provided
+	 * blob key.
 	 *
 	 * @param key blob key associated with the requested file
-	 * @return The URL to the file.
-	 * @throws IOException
+	 * @return The path to the file.
+	 * @throws java.io.FileNotFoundException when the path does not exist;
+	 * @throws IOException if any other error occurs when retrieving the file
 	 */
-	URL getURL(BlobKey key) throws IOException;
-
+	File getFile(BlobKey key) throws IOException;
 
 	/**
-	 * This method deletes the file associated with the provided blob key.
+	 * Returns the path to a local copy of the file associated with the provided job ID and blob key.
+	 *
+	 * @param jobId ID of the job this blob belongs to
+	 * @param key blob key associated with the requested file
+	 * @return The path to the file.
+	 * @throws java.io.FileNotFoundException when the path does not exist;
+	 * @throws IOException if any other error occurs when retrieving the file
+	 */
+	File getFile(JobID jobId, BlobKey key) throws IOException;
+
+	/**
+	 * Deletes the (job-unrelated) file associated with the provided blob key.
 	 *
 	 * @param key associated with the file to be deleted
 	 * @throws IOException
@@ -45,15 +60,19 @@ public interface BlobService {
 	void delete(BlobKey key) throws IOException;
 
 	/**
+	 * Deletes the file associated with the provided job ID and blob key.
+	 *
+	 * @param jobId ID of the job this blob belongs to
+	 * @param key associated with the file to be deleted
+	 * @throws IOException
+	 */
+	void delete(JobID jobId, BlobKey key) throws IOException;
+
+	/**
 	 * Returns the port of the blob service.
 	 * @return the port of the blob service.
 	 */
 	int getPort();
 
-	/**
-	 * Shutdown method which is called to terminate the blob service.
-	 */
-	void shutdown();
-	
 	BlobClient createClient() throws IOException;
 }

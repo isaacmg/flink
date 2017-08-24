@@ -15,18 +15,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.handlers;
+
+import org.apache.flink.api.common.time.Time;
 
 import org.junit.Assert;
 import org.junit.Test;
-import scala.concurrent.duration.FiniteDuration;
 
-import java.util.concurrent.TimeUnit;
-
+/**
+ * Tests for the CurrentJobIdsHandler.
+ */
 public class CurrentJobIdsHandlerTest {
 	@Test
 	public void testGetPaths() {
-		CurrentJobIdsHandler handler = new CurrentJobIdsHandler(new FiniteDuration(0, TimeUnit.SECONDS));
+		CurrentJobIdsHandler handler = new CurrentJobIdsHandler(Time.seconds(0L));
 		String[] paths = handler.getPaths();
 		Assert.assertEquals(1, paths.length);
 		Assert.assertEquals("/jobs", paths[0]);

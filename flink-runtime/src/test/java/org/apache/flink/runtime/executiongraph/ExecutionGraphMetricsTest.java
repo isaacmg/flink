@@ -22,14 +22,14 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.JobException;
-import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
+import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.execution.SuppressRestartsException;
 import org.apache.flink.runtime.executiongraph.metrics.RestartTimeGauge;
+import org.apache.flink.runtime.executiongraph.restart.RestartCallback;
 import org.apache.flink.runtime.executiongraph.restart.RestartStrategy;
 import org.apache.flink.runtime.instance.Instance;
 import org.apache.flink.runtime.instance.SimpleSlot;
@@ -52,10 +52,9 @@ import org.junit.Test;
 import org.mockito.Matchers;
 
 import java.io.IOException;
-import java.net.URL;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -114,13 +113,13 @@ public class ExecutionGraphMetricsTest extends TestLogger {
 			when(simpleSlot.getRoot()).thenReturn(rootSlot);
 			when(simpleSlot.getAllocatedSlot()).thenReturn(mockAllocatedSlot);
 
-			FlinkCompletableFuture<SimpleSlot> future = new FlinkCompletableFuture<>();
+			CompletableFuture<SimpleSlot> future = new CompletableFuture<>();
 			future.complete(simpleSlot);
 			when(scheduler.allocateSlot(any(ScheduledUnit.class), anyBoolean())).thenReturn(future);
 
 			when(rootSlot.getSlotNumber()).thenReturn(0);
 
-			when(taskManagerGateway.submitTask(any(TaskDeploymentDescriptor.class), any(Time.class))).thenReturn(FlinkCompletableFuture.completed(Acknowledge.get()));
+			when(taskManagerGateway.submitTask(any(TaskDeploymentDescriptor.class), any(Time.class))).thenReturn(CompletableFuture.completedFuture(Acknowledge.get()));
 
 			TestingRestartStrategy testingRestartStrategy = new TestingRestartStrategy();
 
@@ -133,10 +132,7 @@ public class ExecutionGraphMetricsTest extends TestLogger {
 				new SerializedValue<ExecutionConfig>(null),
 				timeout,
 				testingRestartStrategy,
-				Collections.<BlobKey>emptyList(),
-				Collections.<URL>emptyList(),
-				scheduler,
-				getClass().getClassLoader());
+				scheduler);
 
 			RestartTimeGauge restartingTime = new RestartTimeGauge(executionGraph);
 
@@ -242,8 +238,8 @@ public class ExecutionGraphMetricsTest extends TestLogger {
 
 			// now lets fail the job while it is in restarting and see whether the restarting time then stops to increase
 			// for this to work, we have to use a SuppressRestartException
-			executionGraph.fail(new SuppressRestartsException(new Exception()));
-
+			executionGraph.failGlobal(new SuppressRestartsException(new Exception()));
+	
 			assertEquals(JobStatus.FAILED, executionGraph.getState());
 
 			previousRestartingTime = restartingTime.getValue();
@@ -261,25 +257,20 @@ public class ExecutionGraphMetricsTest extends TestLogger {
 
 	static class TestingRestartStrategy implements RestartStrategy {
 
-		private boolean restartable = true;
-		private ExecutionGraph executionGraph = null;
+		private RestartCallback restarter;
 
 		@Override
 		public boolean canRestart() {
-			return restartable;
+			return true;
 		}
 
 		@Override
-		public void restart(ExecutionGraph executionGraph) {
-			this.executionGraph = executionGraph;
-		}
-
-		public void setRestartable(boolean restartable) {
-			this.restartable = restartable;
+		public void restart(RestartCallback restarter, ScheduledExecutor executor) {
+			this.restarter = restarter;
 		}
 
 		public void restartExecutionGraph() {
-			executionGraph.restart();
+			restarter.triggerFullRecovery();
 		}
 	}
 

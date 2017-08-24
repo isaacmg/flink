@@ -58,6 +58,13 @@ public class JobManagerOptions {
 		.defaultValue(6123);
 
 	/**
+	 * JVM heap size (in megabytes) for the JobManager
+	 */
+	public static final ConfigOption<Integer> JOB_MANAGER_HEAP_MEMORY =
+		key("jobmanager.heap.mb")
+		.defaultValue(1024);
+
+	/**
 	 * The maximum number of prior execution attempts kept in history.
 	 */
 	public static final ConfigOption<Integer> MAX_ATTEMPTS_HISTORY_SIZE =
@@ -65,94 +72,22 @@ public class JobManagerOptions {
 			.defaultValue(16)
 			.withDeprecatedKeys("job-manager.max-attempts-history-size");
 
-	// ------------------------------------------------------------------------
-	//  JobManager web UI
-	// ------------------------------------------------------------------------
+	/**
+	 * The maximum number of prior execution attempts kept in history.
+	 */
+	public static final ConfigOption<String> EXECUTION_FAILOVER_STRATEGY =
+		key("jobmanager.execution.failover-strategy")
+			.defaultValue("full");
 
 	/**
-	 * The port for the runtime monitor web-frontend server.
+	 * This option specifies the interval in order to trigger a resource manager reconnection if the connection
+	 * to the resource manager has been lost.
+	 *
+	 * This option is only intended for internal use.
 	 */
-	public static final ConfigOption<Integer> WEB_PORT =
-		key("jobmanager.web.port")
-		.defaultValue(8081);
-
-	/**
-	 * Config parameter to override SSL support for the JobManager Web UI
-	 */
-	public static final ConfigOption<Boolean> WEB_SSL_ENABLED =
-		key("jobmanager.web.ssl.enabled")
-		.defaultValue(true);
-
-	/**
-	 * The config parameter defining the flink web directory to be used by the webmonitor.
-	 */
-	public static final ConfigOption<String> WEB_TMP_DIR =
-		key("jobmanager.web.tmpdir")
-		.defaultValue(System.getProperty("java.io.tmpdir"));
-
-	/**
-	 * The config parameter defining the directory for uploading the job jars. If not specified a dynamic directory
-	 * will be used under the directory specified by JOB_MANAGER_WEB_TMPDIR_KEY.
-	 */
-	public static final ConfigOption<String> WEB_UPLOAD_DIR =
-		key("jobmanager.web.upload.dir")
-		.noDefaultValue();
-
-	/**
-	 * The config parameter defining the number of archived jobs for the jobmanager.
-	 */
-	public static final ConfigOption<Integer> WEB_ARCHIVE_COUNT =
-		key("jobmanager.web.history")
-		.defaultValue(5);
-
-	/**
-	 * The log file location (may be in /log for standalone but under log directory when using YARN).
-	 */
-	public static final ConfigOption<String> WEB_LOG_PATH =
-		key("jobmanager.web.log.path")
-		.noDefaultValue();
-
-	/**
-	 * Config parameter indicating whether jobs can be uploaded and run from the web-frontend.
-	 */
-	public static final ConfigOption<Boolean> WEB_SUBMIT_ENABLE =
-		key("jobmanager.web.submit.enable")
-		.defaultValue(true);
-
-	/**
-	 * Config parameter defining the number of checkpoints to remember for recent history.
-	 */
-	public static final ConfigOption<Integer> WEB_CHECKPOINTS_HISTORY_SIZE =
-		key("jobmanager.web.checkpoints.history")
-		.defaultValue(10);
-
-	/**
-	 * Time after which cached stats are cleaned up if not accessed.
-	 */
-	public static final ConfigOption<Integer> WEB_BACKPRESSURE_CLEANUP_INTERVAL =
-		key("jobmanager.web.backpressure.cleanup-interval")
-		.defaultValue(10 * 60 * 1000);
-
-	/**
-	 * Time after which available stats are deprecated and need to be refreshed (by resampling).
-	 */
-	public static final ConfigOption<Integer> WEB_BACKPRESSURE_REFRESH_INTERVAL =
-		key("jobmanager.web.backpressure.refresh-interval")
-		.defaultValue(60 * 1000);
-
-	/**
-	 * Number of stack trace samples to take to determine back pressure.
-	 */
-	public static final ConfigOption<Integer> WEB_BACKPRESSURE_NUM_SAMPLES =
-		key("jobmanager.web.backpressure.num-samples")
-		.defaultValue(100);
-
-	/**
-	 * Delay between stack trace samples to determine back pressure.
-	 */
-	public static final ConfigOption<Integer> WEB_BACKPRESSURE_DELAY =
-		key("jobmanager.web.backpressure.delay-between-samples")
-		.defaultValue(50);
+	public static final ConfigOption<Long> RESOURCE_MANAGER_RECONNECT_INTERVAL =
+		key("jobmanager.resourcemanager.reconnect-interval")
+		.defaultValue(2000L);
 
 	/**
 	 * The location where the JobManager stores the archives of completed jobs.

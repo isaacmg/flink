@@ -18,7 +18,7 @@
 
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 
 import java.io.File;
 import java.util.Map;
@@ -44,13 +44,13 @@ public class JarUploadHandler extends AbstractJsonRequestHandler {
 
 	@Override
 	public String handleJsonRequest(
-				Map<String, String> pathParams,
-				Map<String, String> queryParams,
-				ActorGateway jobManager) throws Exception {
-		
+			Map<String, String> pathParams,
+			Map<String, String> queryParams,
+			JobManagerGateway jobManagerGateway) throws Exception {
+
 		String tempFilePath = queryParams.get("filepath");
 		String filename = queryParams.get("filename");
-		
+
 		File tempFile;
 		if (tempFilePath != null && (tempFile = new File(tempFilePath)).exists()) {
 			if (!tempFile.getName().endsWith(".jar")) {
@@ -58,7 +58,7 @@ public class JarUploadHandler extends AbstractJsonRequestHandler {
 				tempFile.delete();
 				return "{\"error\": \"Only Jar files are allowed.\"}";
 			}
-			
+
 			String filenameWithUUID = UUID.randomUUID() + "_" + filename;
 			File newFile = new File(jarDir, filenameWithUUID);
 			if (tempFile.renameTo(newFile)) {
@@ -70,7 +70,7 @@ public class JarUploadHandler extends AbstractJsonRequestHandler {
 				tempFile.delete();
 			}
 		}
-		
+
 		return "{\"error\": \"Failed to upload the file.\"}";
 	}
 }

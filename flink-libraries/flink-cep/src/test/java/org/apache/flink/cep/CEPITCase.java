@@ -21,6 +21,7 @@ package org.apache.flink.cep;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.cep.nfa.NFA;
 import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.core.fs.FileSystem;
@@ -31,21 +32,28 @@ import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.util.StreamingMultipleProgramsTestBase;
-
 import org.apache.flink.types.Either;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.util.List;
 import java.util.Map;
 
+/**
+ * End to end tests of both CEP operators and {@link NFA}.
+ */
 @SuppressWarnings("serial")
 public class CEPITCase extends StreamingMultipleProgramsTestBase {
 
 	private String resultPath;
 	private String expected;
+
+	private String lateEventPath;
+	private String expectedLateEvents;
 
 	@Rule
 	public TemporaryFolder tempFolder = new TemporaryFolder();
@@ -54,15 +62,20 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 	public void before() throws Exception {
 		resultPath = tempFolder.newFile().toURI().toString();
 		expected = "";
+
+		lateEventPath = tempFolder.newFile().toURI().toString();
+		expectedLateEvents = "";
 	}
 
 	@After
 	public void after() throws Exception {
 		compareResultsByLinesInMemory(expected, resultPath);
+		compareResultsByLinesInMemory(expectedLateEvents, lateEventPath);
 	}
 
 	/**
-	 * Checks that a certain event sequence is recognized
+	 * Checks that a certain event sequence is recognized.
+	 *
 	 * @throws Exception
 	 */
 	@Test
@@ -88,7 +101,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 				return value.getName().equals("start");
 			}
 		})
-		.followedBy("middle").subtype(SubEvent.class).where(
+		.followedByAny("middle").subtype(SubEvent.class).where(
 				new SimpleCondition<SubEvent>() {
 
 					@Override
@@ -97,7 +110,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 					}
 				}
 			)
-		.followedBy("end").where(new SimpleCondition<Event>() {
+		.followedByAny("end").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
@@ -108,12 +121,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 		DataStream<String> result = CEP.pattern(input, pattern).select(new PatternSelectFunction<Event, String>() {
 
 			@Override
-			public String select(Map<String, Event> pattern) {
+			public String select(Map<String, List<Event>> pattern) {
 				StringBuilder builder = new StringBuilder();
 
-				builder.append(pattern.get("start").getId()).append(",")
-					.append(pattern.get("middle").getId()).append(",")
-					.append(pattern.get("end").getId());
+				builder.append(pattern.get("start").get(0).getId()).append(",")
+					.append(pattern.get("middle").get(0).getId()).append(",")
+					.append(pattern.get("end").get(0).getId());
 
 				return builder.toString();
 			}
@@ -163,7 +176,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 				return value.getName().equals("start");
 			}
 		})
-			.followedBy("middle").subtype(SubEvent.class).where(
+			.followedByAny("middle").subtype(SubEvent.class).where(
 				new SimpleCondition<SubEvent>() {
 
 					@Override
@@ -172,7 +185,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 					}
 				}
 			)
-			.followedBy("end").where(new SimpleCondition<Event>() {
+			.followedByAny("end").where(new SimpleCondition<Event>() {
 
 				@Override
 				public boolean filter(Event value) throws Exception {
@@ -183,12 +196,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 		DataStream<String> result = CEP.pattern(input, pattern).select(new PatternSelectFunction<Event, String>() {
 
 			@Override
-			public String select(Map<String, Event> pattern) {
+			public String select(Map<String, List<Event>> pattern) {
 				StringBuilder builder = new StringBuilder();
 
-				builder.append(pattern.get("start").getId()).append(",")
-					.append(pattern.get("middle").getId()).append(",")
-					.append(pattern.get("end").getId());
+				builder.append(pattern.get("start").get(0).getId()).append(",")
+					.append(pattern.get("middle").get(0).getId()).append(",")
+					.append(pattern.get("end").get(0).getId());
 
 				return builder.toString();
 			}
@@ -216,7 +229,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			Tuple2.of(new Event(5, "middle", 5.0), 7L),
 			// last element for high final watermark
 			Tuple2.of(new Event(5, "middle", 5.0), 100L)
-		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event,Long>>() {
+		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event, Long>>() {
 
 			@Override
 			public long extractTimestamp(Tuple2<Event, Long> element, long previousTimestamp) {
@@ -242,13 +255,13 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("start");
 			}
-		}).followedBy("middle").where(new SimpleCondition<Event>() {
+		}).followedByAny("middle").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("middle");
 			}
-		}).followedBy("end").where(new SimpleCondition<Event>() {
+		}).followedByAny("end").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
@@ -260,12 +273,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			new PatternSelectFunction<Event, String>() {
 
 				@Override
-				public String select(Map<String, Event> pattern) {
+				public String select(Map<String, List<Event>> pattern) {
 					StringBuilder builder = new StringBuilder();
 
-					builder.append(pattern.get("start").getId()).append(",")
-						.append(pattern.get("middle").getId()).append(",")
-						.append(pattern.get("end").getId());
+					builder.append(pattern.get("start").get(0).getId()).append(",")
+						.append(pattern.get("middle").get(0).getId()).append(",")
+						.append(pattern.get("end").get(0).getId());
 
 					return builder.toString();
 				}
@@ -299,7 +312,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			Tuple2.of(new Event(1, "middle", 5.0), 7L),
 			Tuple2.of(new Event(3, "middle", 6.0), 9L),
 			Tuple2.of(new Event(3, "end", 7.0), 7L)
-		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event,Long>>() {
+		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event, Long>>() {
 
 			@Override
 			public long extractTimestamp(Tuple2<Event, Long> element, long currentTimestamp) {
@@ -331,13 +344,13 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("start");
 			}
-		}).followedBy("middle").where(new SimpleCondition<Event>() {
+		}).followedByAny("middle").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("middle");
 			}
-		}).followedBy("end").where(new SimpleCondition<Event>() {
+		}).followedByAny("end").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
@@ -349,12 +362,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			new PatternSelectFunction<Event, String>() {
 
 				@Override
-				public String select(Map<String, Event> pattern) {
+				public String select(Map<String, List<Event>> pattern) {
 					StringBuilder builder = new StringBuilder();
 
-					builder.append(pattern.get("start").getId()).append(",")
-						.append(pattern.get("middle").getId()).append(",")
-						.append(pattern.get("end").getId());
+					builder.append(pattern.get("start").get(0).getId()).append(",")
+						.append(pattern.get("middle").get(0).getId()).append(",")
+						.append(pattern.get("end").get(0).getId());
 
 					return builder.toString();
 				}
@@ -389,8 +402,8 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 
 		DataStream<Tuple2<Integer, Integer>> result = pStream.select(new PatternSelectFunction<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>>() {
 			@Override
-			public Tuple2<Integer, Integer> select(Map<String, Tuple2<Integer, Integer>> pattern) throws Exception {
-				return pattern.get("start");
+			public Tuple2<Integer, Integer> select(Map<String, List<Tuple2<Integer, Integer>>> pattern) throws Exception {
+				return pattern.get("start").get(0);
 			}
 		});
 
@@ -408,12 +421,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 
 		DataStream<Integer> input = env.fromElements(1, 2);
 
-		Pattern<Integer, ?> pattern = Pattern.<Integer>begin("start").followedBy("end").within(Time.days(1));
+		Pattern<Integer, ?> pattern = Pattern.<Integer>begin("start").followedByAny("end").within(Time.days(1));
 
 		DataStream<Integer> result = CEP.pattern(input, pattern).select(new PatternSelectFunction<Integer, Integer>() {
 			@Override
-			public Integer select(Map<String, Integer> pattern) throws Exception {
-				return pattern.get("start") + pattern.get("end");
+			public Integer select(Map<String, List<Integer>> pattern) throws Exception {
+				return pattern.get("start").get(0) + pattern.get("end").get(0);
 			}
 		});
 
@@ -436,7 +449,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			Tuple2.of(new Event(1, "middle", 2.0), 5L),
 			Tuple2.of(new Event(1, "start", 2.0), 4L),
 			Tuple2.of(new Event(1, "end", 2.0), 6L)
-		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event,Long>>() {
+		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event, Long>>() {
 
 			@Override
 			public long extractTimestamp(Tuple2<Event, Long> element, long currentTimestamp) {
@@ -462,13 +475,13 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("start");
 			}
-		}).followedBy("middle").where(new SimpleCondition<Event>() {
+		}).followedByAny("middle").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
 				return value.getName().equals("middle");
 			}
-		}).followedBy("end").where(new SimpleCondition<Event>() {
+		}).followedByAny("end").where(new SimpleCondition<Event>() {
 
 			@Override
 			public boolean filter(Event value) throws Exception {
@@ -479,19 +492,19 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 		DataStream<Either<String, String>> result = CEP.pattern(input, pattern).select(
 			new PatternTimeoutFunction<Event, String>() {
 				@Override
-				public String timeout(Map<String, Event> pattern, long timeoutTimestamp) throws Exception {
-					return pattern.get("start").getPrice() + "";
+				public String timeout(Map<String, List<Event>> pattern, long timeoutTimestamp) throws Exception {
+					return pattern.get("start").get(0).getPrice() + "";
 				}
 			},
 			new PatternSelectFunction<Event, String>() {
 
 				@Override
-				public String select(Map<String, Event> pattern) {
+				public String select(Map<String, List<Event>> pattern) {
 					StringBuilder builder = new StringBuilder();
 
-					builder.append(pattern.get("start").getPrice()).append(",")
-						.append(pattern.get("middle").getPrice()).append(",")
-						.append(pattern.get("end").getPrice());
+					builder.append(pattern.get("start").get(0).getPrice()).append(",")
+						.append(pattern.get("middle").get(0).getPrice()).append(",")
+						.append(pattern.get("end").get(0).getPrice());
 
 					return builder.toString();
 				}
@@ -507,7 +520,8 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 	}
 
 	/**
-	 * Checks that a certain event sequence is recognized with an OR filter
+	 * Checks that a certain event sequence is recognized with an OR filter.
+	 *
 	 * @throws Exception
 	 */
 	@Test
@@ -530,7 +544,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 					return value.getName().equals("start");
 				}
 			})
-			.followedBy("middle")
+			.followedByAny("middle")
 			.where(new SimpleCondition<Event>() {
 				@Override
 				public boolean filter(Event value) throws Exception {
@@ -543,7 +557,7 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 					return value.getPrice() == 5.0;
 				}
 			})
-			.followedBy("end").where(new SimpleCondition<Event>() {
+			.followedByAny("end").where(new SimpleCondition<Event>() {
 
 				@Override
 				public boolean filter(Event value) throws Exception {
@@ -554,12 +568,12 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 		DataStream<String> result = CEP.pattern(input, pattern).select(new PatternSelectFunction<Event, String>() {
 
 			@Override
-			public String select(Map<String, Event> pattern) {
+			public String select(Map<String, List<Event>> pattern) {
 				StringBuilder builder = new StringBuilder();
 
-				builder.append(pattern.get("start").getId()).append(",")
-					.append(pattern.get("middle").getId()).append(",")
-					.append(pattern.get("end").getId());
+				builder.append(pattern.get("start").get(0).getId()).append(",")
+					.append(pattern.get("middle").get(0).getId()).append(",")
+					.append(pattern.get("end").get(0).getId());
 
 				return builder.toString();
 			}
@@ -571,5 +585,98 @@ public class CEPITCase extends StreamingMultipleProgramsTestBase {
 		expected = "1,5,6\n1,2,3\n4,5,6\n1,2,6";
 
 		env.execute();
+	}
+
+	/**
+	 * Checks that a certain event sequence is recognized.
+	 *
+	 * @throws Exception
+	 */
+	@Test
+	public void testSimplePatternEventTimeWithComparator() throws Exception {
+		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+		env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+
+		// (Event, timestamp)
+		DataStream<Event> input = env.fromElements(
+			Tuple2.of(new Event(1, "start", 1.0), 5L),
+			Tuple2.of(new Event(2, "middle", 2.0), 1L),
+			Tuple2.of(new Event(3, "end", 3.0), 3L),
+			Tuple2.of(new Event(4, "end", 4.0), 10L),
+			Tuple2.of(new Event(5, "middle", 6.0), 7L),
+			Tuple2.of(new Event(6, "middle", 5.0), 7L),
+			// last element for high final watermark
+			Tuple2.of(new Event(7, "middle", 5.0), 100L)
+		).assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Tuple2<Event, Long>>() {
+
+			@Override
+			public long extractTimestamp(Tuple2<Event, Long> element, long previousTimestamp) {
+				return element.f1;
+			}
+
+			@Override
+			public Watermark checkAndGetNextWatermark(Tuple2<Event, Long> lastElement, long extractedTimestamp) {
+				return new Watermark(lastElement.f1 - 5);
+			}
+
+		}).map(new MapFunction<Tuple2<Event, Long>, Event>() {
+
+			@Override
+			public Event map(Tuple2<Event, Long> value) throws Exception {
+				return value.f0;
+			}
+		});
+
+		EventComparator<Event> comparator = new CustomEventComparator();
+
+		Pattern<Event, ? extends Event> pattern = Pattern.<Event>begin("start").where(new SimpleCondition<Event>() {
+
+			@Override
+			public boolean filter(Event value) throws Exception {
+				return value.getName().equals("start");
+			}
+		}).followedByAny("middle").where(new SimpleCondition<Event>() {
+
+			@Override
+			public boolean filter(Event value) throws Exception {
+				return value.getName().equals("middle");
+			}
+		}).followedByAny("end").where(new SimpleCondition<Event>() {
+
+			@Override
+			public boolean filter(Event value) throws Exception {
+				return value.getName().equals("end");
+			}
+		});
+
+		DataStream<String> result = CEP.pattern(input, pattern, comparator).select(
+			new PatternSelectFunction<Event, String>() {
+
+				@Override
+				public String select(Map<String, List<Event>> pattern) {
+					StringBuilder builder = new StringBuilder();
+
+					builder.append(pattern.get("start").get(0).getId()).append(",")
+						.append(pattern.get("middle").get(0).getId()).append(",")
+						.append(pattern.get("end").get(0).getId());
+
+					return builder.toString();
+				}
+			}
+		);
+
+		result.writeAsText(resultPath, FileSystem.WriteMode.OVERWRITE);
+
+		// the expected sequence of matching event ids
+		expected = "1,6,4\n1,5,4";
+
+		env.execute();
+	}
+
+	private static class CustomEventComparator implements EventComparator<Event> {
+		@Override
+		public int compare(Event o1, Event o2) {
+			return Double.compare(o1.getPrice(), o2.getPrice());
+		}
 	}
 }

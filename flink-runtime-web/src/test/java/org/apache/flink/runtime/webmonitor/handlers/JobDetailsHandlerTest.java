@@ -15,20 +15,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.google.common.collect.Lists;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.AccessExecutionVertex;
 import org.apache.flink.runtime.executiongraph.IOMetrics;
 import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.runtime.webmonitor.ExecutionGraphHolder;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.JsonArchivist;
 import org.apache.flink.runtime.webmonitor.utils.ArchivedJobGenerationUtils;
+
+import org.apache.flink.shaded.guava18.com.google.common.collect.Lists;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -37,6 +41,11 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 
+import static org.mockito.Mockito.mock;
+
+/**
+ * Tests for the JobDetailsHandler.
+ */
 public class JobDetailsHandlerTest {
 
 	@Test
@@ -59,7 +68,7 @@ public class JobDetailsHandlerTest {
 
 	@Test
 	public void testGetPaths() {
-		JobDetailsHandler handler = new JobDetailsHandler(null, null);
+		JobDetailsHandler handler = new JobDetailsHandler(mock(ExecutionGraphHolder.class), null);
 		String[] paths = handler.getPaths();
 		Assert.assertEquals(2, paths.length);
 		List<String> pathsList = Lists.newArrayList(paths);
@@ -76,7 +85,7 @@ public class JobDetailsHandlerTest {
 	}
 
 	private static void compareJobDetails(AccessExecutionGraph originalJob, String json) throws IOException {
-		JsonNode result = ArchivedJobGenerationUtils.mapper.readTree(json);
+		JsonNode result = ArchivedJobGenerationUtils.MAPPER.readTree(json);
 
 		Assert.assertEquals(originalJob.getJobID().toString(), result.get("jid").asText());
 		Assert.assertEquals(originalJob.getJobName(), result.get("name").asText());
@@ -154,6 +163,6 @@ public class JobDetailsHandlerTest {
 		Assert.assertEquals(0, statusCounts.get(ExecutionState.CANCELED.name()).asInt());
 		Assert.assertEquals(0, statusCounts.get(ExecutionState.FAILED.name()).asInt());
 
-		Assert.assertEquals(ArchivedJobGenerationUtils.mapper.readTree(originalJob.getJsonPlan()), result.get("plan"));
+		Assert.assertEquals(ArchivedJobGenerationUtils.MAPPER.readTree(originalJob.getJsonPlan()), result.get("plan"));
 	}
 }

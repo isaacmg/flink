@@ -27,10 +27,14 @@ import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link VertexDegree}.
+ */
 public class VertexDegreeTest
 extends AsmTestBase {
 
@@ -46,7 +50,7 @@ extends AsmTestBase {
 			"(5,1)";
 
 		DataSet<Vertex<IntValue, LongValue>> degreeOnSourceId = undirectedSimpleGraph
-			.run(new VertexDegree<IntValue, NullValue, NullValue>());
+			.run(new VertexDegree<>());
 
 		TestBaseUtils.compareResultAsText(degreeOnSourceId.collect(), expectedResult);
 
@@ -63,7 +67,7 @@ extends AsmTestBase {
 		long expectedDegree = completeGraphVertexCount - 1;
 
 		DataSet<Vertex<LongValue, LongValue>> degreeOnSourceId = completeGraph
-			.run(new VertexDegree<LongValue, NullValue, NullValue>());
+			.run(new VertexDegree<>());
 
 		for (Vertex<LongValue, LongValue> vertex : degreeOnSourceId.collect()) {
 			assertEquals(expectedDegree, vertex.getValue().getValue());
@@ -104,8 +108,8 @@ extends AsmTestBase {
 	@Test
 	public void testWithRMatGraph()
 			throws Exception {
-		DataSet<Vertex<LongValue, LongValue>> degreeOnSourceId = undirectedRMatGraph
-			.run(new VertexDegree<LongValue, NullValue, NullValue>());
+		DataSet<Vertex<LongValue, LongValue>> degreeOnSourceId = undirectedRMatGraph(10, 16)
+			.run(new VertexDegree<>());
 
 		Checksum checksumOnSourceId = new ChecksumHashCode<Vertex<LongValue, LongValue>>()
 			.run(degreeOnSourceId)
@@ -114,7 +118,7 @@ extends AsmTestBase {
 		assertEquals(902, checksumOnSourceId.getCount());
 		assertEquals(0x0000000000e1fb30L, checksumOnSourceId.getChecksum());
 
-		DataSet<Vertex<LongValue, LongValue>> degreeOnTargetId = undirectedRMatGraph
+		DataSet<Vertex<LongValue, LongValue>> degreeOnTargetId = undirectedRMatGraph(10, 16)
 			.run(new VertexDegree<LongValue, NullValue, NullValue>()
 				.setReduceOnTargetId(true));
 

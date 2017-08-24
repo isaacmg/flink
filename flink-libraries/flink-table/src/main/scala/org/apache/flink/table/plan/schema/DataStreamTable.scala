@@ -27,4 +27,5 @@ class DataStreamTable[T](
     override val fieldNames: Array[String],
     override val statistic: FlinkStatistic = FlinkStatistic.UNKNOWN)
   extends FlinkTable[T](dataStream.getType, fieldIndexes, fieldNames, statistic) {
+
 }

@@ -29,10 +29,14 @@ import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.types.NullValue;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link EdgeSourceDegrees}.
+ */
 public class EdgeSourceDegreesTest
 extends AsmTestBase {
 
@@ -49,7 +53,7 @@ extends AsmTestBase {
 			"(5,3,((null),(1,1,0)))";
 
 		DataSet<Edge<IntValue, Tuple2<NullValue, Degrees>>> sourceDegrees = directedSimpleGraph
-				.run(new EdgeSourceDegrees<IntValue, NullValue, NullValue>());
+				.run(new EdgeSourceDegrees<>());
 
 		TestBaseUtils.compareResultAsText(sourceDegrees.collect(), expectedResult);
 	}
@@ -57,8 +61,8 @@ extends AsmTestBase {
 	@Test
 	public void testWithRMatGraph()
 			throws Exception {
-		DataSet<Edge<LongValue, Tuple2<NullValue, Degrees>>> sourceDegrees = directedRMatGraph
-			.run(new EdgeSourceDegrees<LongValue, NullValue, NullValue>());
+		DataSet<Edge<LongValue, Tuple2<NullValue, Degrees>>> sourceDegrees = directedRMatGraph(10, 16)
+			.run(new EdgeSourceDegrees<>());
 
 		Checksum checksum = new ChecksumHashCode<Edge<LongValue, Tuple2<NullValue, Degrees>>>()
 			.run(sourceDegrees)

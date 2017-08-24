@@ -134,12 +134,6 @@ stream = env
 </div>
 </div>
 
-The current FlinkKafkaConsumer implementation will establish a connection from the client (when calling the constructor)
-for querying the list of topics and partitions.
-
-For this to work, the consumer needs to be able to access the consumers from the machine submitting the job to the Flink cluster.
-If you experience any issues with the Kafka consumer on the client side, the client log might contain information about failed requests, etc.
-
 ### The `DeserializationSchema`
 
 The Flink Kafka Consumer needs to know how to turn the binary data in Kafka into Java/Scala objects. The
@@ -291,6 +285,21 @@ So if the topology fails due to loss of a TaskManager, there must still be enoug
 Flink on YARN supports automatic restart of lost YARN containers.
 
 If checkpointing is not enabled, the Kafka consumer will periodically commit the offsets to Zookeeper.
+
+### Kafka Consumers Partition Discovery
+
+The Flink Kafka Consumer supports discovering dynamically created Kafka partitions, and consumes them with
+exactly-once guarantees. All partitions discovered after the initial retrieval of partition metadata (i.e., when the
+job starts running) will be consumed from the earliest possible offset.
+
+By default, partition discovery is disabled. To enable it, set a non-negative value
+for `flink.partition-discovery.interval-millis` in the provided properties config,
+representing the discovery interval in milliseconds. 
+
+<span class="label label-danger">Limitation</span> When the consumer is restored from a savepoint from Flink versions
+prior to Flink 1.3.x, partition discovery cannot be enabled on the restore run. If enabled, the restore would fail
+with an exception. In this case, in order to use partition discovery, please first take a savepoint in Flink 1.3.x and
+then restore again from that.
 
 ### Kafka Consumers Offset Committing Behaviour Configuration
 
@@ -456,9 +465,9 @@ are other constructor variants that allow providing the following:
  Please refer to the [Apache Kafka documentation](https://kafka.apache.org/documentation.html) for
  details on how to configure Kafka Producers.
  * *Custom partitioner*: To assign records to specific
- partitions, you can provide an implementation of a `KafkaPartitioner` to the
+ partitions, you can provide an implementation of a `FlinkKafkaPartitioner` to the
  constructor. This partitioner will be called for each record in the stream
- to determine which exact partition the record will be sent to.
+ to determine which exact partition of the target topic the record should be sent to.
  * *Advanced serialization schema*: Similar to the consumer,
  the producer also allows using an advanced serialization schema called `KeyedSerializationSchema`,
  which allows serializing the key and value separately. It also allows to override the target topic,
@@ -564,5 +573,5 @@ Once Kerberos-based Flink security is enabled, you can authenticate to Kafka wit
 When using standalone Flink deployment, you can also use `SASL_SSL`; please see how to configure the Kafka client for SSL [here](https://kafka.apache.org/documentation/#security_configclients). 
 - Set `sasl.kerberos.service.name` to `kafka` (default `kafka`): The value for this should match the `sasl.kerberos.service.name` used for Kafka broker configurations. A mismatch in service name between client and server configuration will cause the authentication to fail.
 
-For more information on Flink configuration for Kerberos security, please see [here]({{ site.baseurl}}/setup/config.html).
+For more information on Flink configuration for Kerberos security, please see [here]({{ site.baseurl}}/ops/config.html).
 You can also find [here]({{ site.baseurl}}/ops/security-kerberos.html) further details on how Flink internally setups Kerberos-based security.

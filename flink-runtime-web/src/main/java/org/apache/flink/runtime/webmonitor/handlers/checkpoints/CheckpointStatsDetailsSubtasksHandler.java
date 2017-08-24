@@ -18,7 +18,6 @@
 
 package org.apache.flink.runtime.webmonitor.handlers.checkpoints;
 
-import com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.flink.runtime.checkpoint.AbstractCheckpointStats;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsHistory;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
@@ -26,14 +25,16 @@ import org.apache.flink.runtime.checkpoint.MinMaxAvgStats;
 import org.apache.flink.runtime.checkpoint.SubtaskStateStats;
 import org.apache.flink.runtime.checkpoint.TaskStateStats;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
-import org.apache.flink.runtime.instance.ActorGateway;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.webmonitor.ExecutionGraphHolder;
 import org.apache.flink.runtime.webmonitor.handlers.AbstractExecutionGraphRequestHandler;
 import org.apache.flink.runtime.webmonitor.handlers.AbstractJobVertexRequestHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JsonFactory;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.JsonArchivist;
+
+import com.fasterxml.jackson.core.JsonGenerator;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -70,8 +71,8 @@ public class CheckpointStatsDetailsSubtasksHandler extends AbstractExecutionGrap
 	public String handleJsonRequest(
 		Map<String, String> pathParams,
 		Map<String, String> queryParams,
-		ActorGateway jobManager) throws Exception {
-		return super.handleJsonRequest(pathParams, queryParams, jobManager);
+		JobManagerGateway jobManagerGateway) throws Exception {
+		return super.handleJsonRequest(pathParams, queryParams, jobManagerGateway);
 	}
 
 	@Override
@@ -107,10 +108,13 @@ public class CheckpointStatsDetailsSubtasksHandler extends AbstractExecutionGrap
 		if (taskStats == null) {
 			return "{}";
 		}
-		
+
 		return createSubtaskCheckpointDetailsJson(checkpoint, taskStats);
 	}
 
+	/**
+	 * Archivist for the CheckpointStatsDetailsSubtasksHandler.
+	 */
 	public static class CheckpointStatsDetailsSubtasksJsonArchivist implements JsonArchivist {
 
 		@Override
@@ -137,7 +141,7 @@ public class CheckpointStatsDetailsSubtasksHandler extends AbstractExecutionGrap
 
 	private static String createSubtaskCheckpointDetailsJson(AbstractCheckpointStats checkpoint, TaskStateStats taskStats) throws IOException {
 		StringWriter writer = new StringWriter();
-		JsonGenerator gen = JsonFactory.jacksonFactory.createGenerator(writer);
+		JsonGenerator gen = JsonFactory.JACKSON_FACTORY.createGenerator(writer);
 
 		gen.writeStartObject();
 		// Overview

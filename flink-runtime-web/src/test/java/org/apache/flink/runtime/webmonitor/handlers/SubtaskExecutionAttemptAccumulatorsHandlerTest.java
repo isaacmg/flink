@@ -15,22 +15,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.flink.runtime.executiongraph.AccessExecution;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
+import org.apache.flink.runtime.webmonitor.ExecutionGraphHolder;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.JsonArchivist;
 import org.apache.flink.runtime.webmonitor.utils.ArchivedJobGenerationUtils;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
 import java.util.Collection;
 
+import static org.mockito.Mockito.mock;
+
+/**
+ * Tests for the SubtaskExecutionAttemptAccumulatorsHandler.
+ */
 public class SubtaskExecutionAttemptAccumulatorsHandlerTest {
 
 	@Test
@@ -48,7 +56,7 @@ public class SubtaskExecutionAttemptAccumulatorsHandlerTest {
 			"/jobs/" + originalJob.getJobID() +
 			"/vertices/" + originalTask.getJobVertexId() +
 			"/subtasks/" + originalAttempt.getParallelSubtaskIndex() +
-			"/attempts/" + originalAttempt.getAttemptNumber() + 
+			"/attempts/" + originalAttempt.getAttemptNumber() +
 			"/accumulators",
 			archive.getPath());
 		compareAttemptAccumulators(originalAttempt, archive.getJson());
@@ -56,7 +64,7 @@ public class SubtaskExecutionAttemptAccumulatorsHandlerTest {
 
 	@Test
 	public void testGetPaths() {
-		SubtaskExecutionAttemptAccumulatorsHandler handler = new SubtaskExecutionAttemptAccumulatorsHandler(null);
+		SubtaskExecutionAttemptAccumulatorsHandler handler = new SubtaskExecutionAttemptAccumulatorsHandler(mock(ExecutionGraphHolder.class));
 		String[] paths = handler.getPaths();
 		Assert.assertEquals(1, paths.length);
 		Assert.assertEquals("/jobs/:jobid/vertices/:vertexid/subtasks/:subtasknum/attempts/:attempt/accumulators", paths[0]);
@@ -71,7 +79,7 @@ public class SubtaskExecutionAttemptAccumulatorsHandlerTest {
 	}
 
 	private static void compareAttemptAccumulators(AccessExecution originalAttempt, String json) throws IOException {
-		JsonNode result = ArchivedJobGenerationUtils.mapper.readTree(json);
+		JsonNode result = ArchivedJobGenerationUtils.MAPPER.readTree(json);
 
 		Assert.assertEquals(originalAttempt.getParallelSubtaskIndex(), result.get("subtask").asInt());
 		Assert.assertEquals(originalAttempt.getAttemptNumber(), result.get("attempt").asInt());

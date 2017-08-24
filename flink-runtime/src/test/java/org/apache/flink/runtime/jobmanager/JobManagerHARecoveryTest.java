@@ -18,6 +18,62 @@
 
 package org.apache.flink.runtime.jobmanager;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.BlobServerOptions;
+import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.akka.AkkaUtils;
+import org.apache.flink.runtime.akka.ListeningBehaviour;
+import org.apache.flink.runtime.blob.BlobServer;
+import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
+import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
+import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
+import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
+import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
+import org.apache.flink.runtime.checkpoint.StandaloneCheckpointIDCounter;
+import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.execution.librarycache.BlobLibraryCacheManager;
+import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy;
+import org.apache.flink.runtime.executiongraph.restart.RestartStrategyFactory;
+import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
+import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.runtime.instance.AkkaActorGateway;
+import org.apache.flink.runtime.instance.InstanceManager;
+import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
+import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
+import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
+import org.apache.flink.runtime.jobgraph.tasks.StatefulTask;
+import org.apache.flink.runtime.jobmanager.scheduler.Scheduler;
+import org.apache.flink.runtime.leaderelection.LeaderElectionService;
+import org.apache.flink.runtime.leaderelection.TestingLeaderElectionService;
+import org.apache.flink.runtime.leaderelection.TestingLeaderRetrievalService;
+import org.apache.flink.runtime.messages.JobManagerMessages;
+import org.apache.flink.runtime.metrics.MetricRegistry;
+import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
+import org.apache.flink.runtime.taskmanager.TaskManager;
+import org.apache.flink.runtime.testingUtils.TestingJobManager;
+import org.apache.flink.runtime.testingUtils.TestingJobManagerMessages;
+import org.apache.flink.runtime.testingUtils.TestingMessages;
+import org.apache.flink.runtime.testingUtils.TestingTaskManager;
+import org.apache.flink.runtime.testingUtils.TestingTaskManagerMessages;
+import org.apache.flink.runtime.testingUtils.TestingUtils;
+import org.apache.flink.runtime.testutils.RecoverableCompletedCheckpointStore;
+import org.apache.flink.runtime.util.TestByteStreamStateHandleDeepCompare;
+import org.apache.flink.util.InstantiationUtil;
+import org.apache.flink.util.TestLogger;
+
 import akka.actor.ActorRef;
 import akka.actor.ActorSystem;
 import akka.actor.Identify;
@@ -28,78 +84,13 @@ import akka.japi.pf.ReceiveBuilder;
 import akka.pattern.Patterns;
 import akka.testkit.CallingThreadDispatcher;
 import akka.testkit.JavaTestKit;
-import org.apache.flink.api.common.JobID;
-import org.apache.flink.configuration.ConfigConstants;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.HighAvailabilityOptions;
-import org.apache.flink.core.fs.FSDataInputStream;
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.runtime.akka.AkkaUtils;
-import org.apache.flink.runtime.akka.ListeningBehaviour;
-import org.apache.flink.runtime.blob.BlobServer;
-import org.apache.flink.runtime.blob.BlobService;
-import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
-import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
-import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
-import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
-import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
-import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
-import org.apache.flink.runtime.checkpoint.StandaloneCheckpointIDCounter;
-import org.apache.flink.runtime.checkpoint.SubtaskState;
-import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.execution.librarycache.BlobLibraryCacheManager;
-import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy;
-import org.apache.flink.runtime.executiongraph.restart.RestartStrategyFactory;
-import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
-import org.apache.flink.runtime.instance.ActorGateway;
-import org.apache.flink.runtime.instance.AkkaActorGateway;
-import org.apache.flink.runtime.instance.InstanceManager;
-import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.runtime.jobgraph.JobVertex;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
-import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
-import org.apache.flink.runtime.jobgraph.tasks.JobSnapshottingSettings;
-import org.apache.flink.runtime.jobgraph.tasks.StatefulTask;
-import org.apache.flink.runtime.jobmanager.scheduler.Scheduler;
-import org.apache.flink.runtime.leaderelection.LeaderElectionService;
-import org.apache.flink.runtime.leaderelection.TestingLeaderElectionService;
-import org.apache.flink.runtime.leaderelection.TestingLeaderRetrievalService;
-import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
-import org.apache.flink.runtime.messages.JobManagerMessages;
-import org.apache.flink.runtime.metrics.MetricRegistry;
-import org.apache.flink.runtime.state.ChainedStateHandle;
-import org.apache.flink.runtime.state.StreamStateHandle;
-import org.apache.flink.runtime.state.TaskStateHandles;
-import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
-import org.apache.flink.runtime.taskmanager.TaskManager;
-import org.apache.flink.runtime.testingUtils.TestingJobManager;
-import org.apache.flink.runtime.testingUtils.TestingJobManagerMessages;
-import org.apache.flink.runtime.testingUtils.TestingMessages;
-import org.apache.flink.runtime.testingUtils.TestingTaskManager;
-import org.apache.flink.runtime.testingUtils.TestingTaskManagerMessages;
-import org.apache.flink.runtime.testingUtils.TestingUtils;
-import org.apache.flink.runtime.util.TestByteStreamStateHandleDeepCompare;
-import org.apache.flink.util.InstantiationUtil;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-import scala.Int;
-import scala.Option;
-import scala.PartialFunction;
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.Deadline;
-import scala.concurrent.duration.FiniteDuration;
-import scala.runtime.BoxedUnit;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -113,6 +104,15 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import scala.Int;
+import scala.Option;
+import scala.PartialFunction;
+import scala.concurrent.Await;
+import scala.concurrent.Future;
+import scala.concurrent.duration.Deadline;
+import scala.concurrent.duration.FiniteDuration;
+import scala.runtime.BoxedUnit;
+
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThat;
@@ -121,7 +121,7 @@ import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class JobManagerHARecoveryTest {
+public class JobManagerHARecoveryTest extends TestLogger {
 
 	private static ActorSystem system;
 
@@ -159,24 +159,31 @@ public class JobManagerHARecoveryTest {
 		flinkConfiguration.setString(HighAvailabilityOptions.HA_MODE, "zookeeper");
 		flinkConfiguration.setString(HighAvailabilityOptions.HA_STORAGE_PATH, temporaryFolder.newFolder().toString());
 		flinkConfiguration.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, slots);
+		flinkConfiguration.setLong(BlobServerOptions.CLEANUP_INTERVAL, 3_600L);
 
 		try {
 			Scheduler scheduler = new Scheduler(TestingUtils.defaultExecutionContext());
 
 			MySubmittedJobGraphStore mySubmittedJobGraphStore = new MySubmittedJobGraphStore();
-			MyCheckpointStore checkpointStore = new MyCheckpointStore();
+			CompletedCheckpointStore checkpointStore = new RecoverableCompletedCheckpointStore();
 			CheckpointIDCounter checkpointCounter = new StandaloneCheckpointIDCounter();
 			CheckpointRecoveryFactory checkpointStateFactory = new MyCheckpointRecoveryFactory(checkpointStore, checkpointCounter);
 			TestingLeaderElectionService myLeaderElectionService = new TestingLeaderElectionService();
 			TestingLeaderRetrievalService myLeaderRetrievalService = new TestingLeaderRetrievalService(
-				"localhost",
-				HighAvailabilityServices.DEFAULT_LEADER_ID);
+				null,
+				null);
+			TestingHighAvailabilityServices testingHighAvailabilityServices = new TestingHighAvailabilityServices();
+
+			testingHighAvailabilityServices.setJobMasterLeaderRetriever(HighAvailabilityServices.DEFAULT_JOB_ID, myLeaderRetrievalService);
 
 			InstanceManager instanceManager = new InstanceManager();
 			instanceManager.addInstanceListener(scheduler);
 
 			archive = system.actorOf(JobManager.getArchiveProps(MemoryArchivist.class, 10, Option.<Path>empty()));
 
+			BlobServer blobServer = new BlobServer(
+				flinkConfiguration,
+				testingHighAvailabilityServices.createBlobStore());
 			Props jobManagerProps = Props.create(
 				TestingJobManager.class,
 				flinkConfiguration,
@@ -184,7 +191,8 @@ public class JobManagerHARecoveryTest {
 				TestingUtils.defaultExecutor(),
 				instanceManager,
 				scheduler,
-				new BlobLibraryCacheManager(new BlobServer(flinkConfiguration), 3600000),
+				blobServer,
+				new BlobLibraryCacheManager(blobServer),
 				archive,
 				new FixedDelayRestartStrategy.FixedDelayRestartStrategyFactory(Int.MaxValue(), 100),
 				timeout,
@@ -198,14 +206,14 @@ public class JobManagerHARecoveryTest {
 			ActorGateway gateway = new AkkaActorGateway(jobManager, leaderSessionID);
 
 			taskManager = TaskManager.startTaskManagerComponentsAndActor(
-					flinkConfiguration,
-					ResourceID.generate(),
-					system,
-					"localhost",
-					Option.apply("taskmanager"),
-					Option.apply((LeaderRetrievalService) myLeaderRetrievalService),
-					true,
-					TestingTaskManager.class);
+				flinkConfiguration,
+				ResourceID.generate(),
+				system,
+				testingHighAvailabilityServices,
+				"localhost",
+				Option.apply("taskmanager"),
+				true,
+				TestingTaskManager.class);
 
 			ActorGateway tmGateway = new AkkaActorGateway(taskManager, leaderSessionID);
 
@@ -220,13 +228,13 @@ public class JobManagerHARecoveryTest {
 			JobGraph jobGraph = new JobGraph("TestingJob", sourceJobVertex);
 
 			List<JobVertexID> vertexId = Collections.singletonList(sourceJobVertex.getID());
-			jobGraph.setSnapshotSettings(new JobSnapshottingSettings(
+			jobGraph.setSnapshotSettings(new JobCheckpointingSettings(
 					vertexId,
 					vertexId,
 					vertexId,
-					100,
-					10 * 60 * 1000,
-					0,
+					100L,
+					10L * 60L * 1000L,
+					0L,
 					1,
 					ExternalizedCheckpointSettings.none(),
 					null,
@@ -347,6 +355,7 @@ public class JobManagerHARecoveryTest {
 
 			final Collection<JobID> recoveredJobs = new ArrayList<>(2);
 
+			BlobServer blobServer = mock(BlobServer.class);
 			Props jobManagerProps = Props.create(
 				TestingFailingHAJobManager.class,
 				flinkConfiguration,
@@ -354,7 +363,8 @@ public class JobManagerHARecoveryTest {
 				TestingUtils.defaultExecutor(),
 				mock(InstanceManager.class),
 				mock(Scheduler.class),
-				new BlobLibraryCacheManager(mock(BlobService.class), 1 << 20),
+				blobServer,
+				new BlobLibraryCacheManager(blobServer),
 				ActorRef.noSender(),
 				new FixedDelayRestartStrategy.FixedDelayRestartStrategyFactory(Int.MaxValue(), 100),
 				timeout,
@@ -391,6 +401,7 @@ public class JobManagerHARecoveryTest {
 			Executor ioExecutor,
 			InstanceManager instanceManager,
 			Scheduler scheduler,
+			BlobServer blobServer,
 			BlobLibraryCacheManager libraryCacheManager,
 			ActorRef archive,
 			RestartStrategyFactory restartStrategyFactory,
@@ -407,6 +418,7 @@ public class JobManagerHARecoveryTest {
 				ioExecutor,
 				instanceManager,
 				scheduler,
+				blobServer,
 				libraryCacheManager,
 				archive,
 				restartStrategyFactory,
@@ -435,67 +447,6 @@ public class JobManagerHARecoveryTest {
 					TestingFailingHAJobManager.super.handleMessage().apply(o);
 				}
 			}).build();
-		}
-	}
-
-	/**
-	 * A checkpoint store, which supports shutdown and suspend. You can use this to test HA
-	 * as long as the factory always returns the same store instance.
-	 */
-	static class MyCheckpointStore implements CompletedCheckpointStore {
-
-		private final ArrayDeque<CompletedCheckpoint> checkpoints = new ArrayDeque<>(2);
-
-		private final ArrayDeque<CompletedCheckpoint> suspended = new ArrayDeque<>(2);
-
-		@Override
-		public void recover() throws Exception {
-			checkpoints.addAll(suspended);
-			suspended.clear();
-		}
-
-		@Override
-		public void addCheckpoint(CompletedCheckpoint checkpoint) throws Exception {
-			checkpoints.addLast(checkpoint);
-			if (checkpoints.size() > 1) {
-				checkpoints.removeFirst().subsume();
-			}
-		}
-
-		@Override
-		public CompletedCheckpoint getLatestCheckpoint() throws Exception {
-			return checkpoints.isEmpty() ? null : checkpoints.getLast();
-		}
-
-		@Override
-		public void shutdown(JobStatus jobStatus) throws Exception {
-			if (jobStatus.isGloballyTerminalState()) {
-				checkpoints.clear();
-				suspended.clear();
-			} else {
-				suspended.addAll(checkpoints);
-				checkpoints.clear();
-			}
-		}
-
-		@Override
-		public List<CompletedCheckpoint> getAllCheckpoints() throws Exception {
-			return new ArrayList<>(checkpoints);
-		}
-
-		@Override
-		public int getNumberOfRetainedCheckpoints() {
-			return checkpoints.size();
-		}
-
-		@Override
-		public int getMaxNumberOfRetainedCheckpoints() {
-			return 1;
-		}
-
-		@Override
-		public boolean requiresExternalizedCheckpoints() {
-			return false;
 		}
 	}
 
@@ -606,10 +557,10 @@ public class JobManagerHARecoveryTest {
 
 		@Override
 		public void setInitialState(
-				TaskStateHandles taskStateHandles) throws Exception {
+			TaskStateSnapshot taskStateHandles) throws Exception {
 			int subtaskIndex = getIndexInSubtaskGroup();
 			if (subtaskIndex < recoveredStates.length) {
-				try (FSDataInputStream in = taskStateHandles.getLegacyOperatorState().get(0).openInputStream()) {
+				try (FSDataInputStream in = taskStateHandles.getSubtaskStateMappings().iterator().next().getValue().getLegacyOperatorState().openInputStream()) {
 					recoveredStates[subtaskIndex] = InstantiationUtil.deserializeObject(in, getUserCodeClassLoader());
 				}
 			}
@@ -621,10 +572,11 @@ public class JobManagerHARecoveryTest {
 					String.valueOf(UUID.randomUUID()),
 					InstantiationUtil.serializeObject(checkpointMetaData.getCheckpointId()));
 
-			ChainedStateHandle<StreamStateHandle> chainedStateHandle =
-					new ChainedStateHandle<StreamStateHandle>(Collections.singletonList(byteStreamStateHandle));
-			SubtaskState checkpointStateHandles =
-					new SubtaskState(chainedStateHandle, null, null, null, null);
+			TaskStateSnapshot checkpointStateHandles = new TaskStateSnapshot();
+			checkpointStateHandles.putSubtaskStateByOperatorID(
+				OperatorID.fromJobVertexID(getEnvironment().getJobVertexId()),
+				new OperatorSubtaskState(byteStreamStateHandle)
+			);
 
 			getEnvironment().acknowledgeCheckpoint(
 					checkpointMetaData.getCheckpointId(),
@@ -663,5 +615,4 @@ public class JobManagerHARecoveryTest {
 			return recoveredStates;
 		}
 	}
-
 }

@@ -20,26 +20,29 @@ package org.apache.flink.runtime.webmonitor.handlers;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
-import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.webmonitor.ExecutionGraphHolder;
 import org.apache.flink.runtime.webmonitor.NotFoundException;
+import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.Preconditions;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Base class for request handlers whose response depends on an ExecutionGraph
  * that can be retrieved via "jobid" parameter.
  */
 public abstract class AbstractExecutionGraphRequestHandler extends AbstractJsonRequestHandler {
-	
+
 	private final ExecutionGraphHolder executionGraphHolder;
-	
+
 	public AbstractExecutionGraphRequestHandler(ExecutionGraphHolder executionGraphHolder) {
-		this.executionGraphHolder = executionGraphHolder;
+		this.executionGraphHolder = Preconditions.checkNotNull(executionGraphHolder);
 	}
 
 	@Override
-	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, ActorGateway jobManager) throws Exception {
+	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, JobManagerGateway jobManagerGateway) throws Exception {
 		String jidString = pathParams.get("jobid");
 		if (jidString == null) {
 			throw new RuntimeException("JobId parameter missing");
@@ -50,16 +53,21 @@ public abstract class AbstractExecutionGraphRequestHandler extends AbstractJsonR
 			jid = JobID.fromHexString(jidString);
 		}
 		catch (Exception e) {
-			throw new RuntimeException("Invalid JobID string '" + jidString + "': " + e.getMessage()); 
+			throw new RuntimeException("Invalid JobID string '" + jidString + "': " + e.getMessage());
 		}
-		
-		AccessExecutionGraph eg = executionGraphHolder.getExecutionGraph(jid, jobManager);
-		if (eg == null) {
-			throw new NotFoundException("Could not find job with id " + jid);
+
+		final Optional<AccessExecutionGraph> optGraph;
+
+		try {
+			optGraph = executionGraphHolder.getExecutionGraph(jid, jobManagerGateway);
+		} catch (Exception e) {
+			throw new FlinkException("Could not retrieve ExecutionGraph for job with jobId " + jid + " from the JobManager.", e);
 		}
-		
-		return handleRequest(eg, pathParams);
+
+		final AccessExecutionGraph graph = optGraph.orElseThrow(() -> new NotFoundException("Could not find job with jobId " + jid + '.'));
+
+		return handleRequest(graph, pathParams);
 	}
-	
+
 	public abstract String handleRequest(AccessExecutionGraph graph, Map<String, String> params) throws Exception;
 }

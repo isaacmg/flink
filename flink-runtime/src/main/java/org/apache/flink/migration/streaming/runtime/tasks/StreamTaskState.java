@@ -27,13 +27,16 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.HashMap;
 
+/**
+ * @deprecated Internal class for savepoint backwards compatibility. Don't use for other purposes.
+ */
 @Deprecated
 @Internal
 @SuppressWarnings("deprecation")
 public class StreamTaskState implements Serializable, Closeable {
 
 	private static final long serialVersionUID = 1L;
-	
+
 	private StateHandle<?> operatorState;
 
 	private StateHandle<Serializable> functionState;
@@ -71,13 +74,12 @@ public class StreamTaskState implements Serializable, Closeable {
 	/**
 	 * Checks if this state object actually contains any state, or if all of the state
 	 * fields are null.
-	 * 
+	 *
 	 * @return True, if all state is null, false if at least one state is not null.
 	 */
 	public boolean isEmpty() {
 		return operatorState == null & functionState == null & kvStates == null;
 	}
-
 
 	@Override
 	public void close() throws IOException {

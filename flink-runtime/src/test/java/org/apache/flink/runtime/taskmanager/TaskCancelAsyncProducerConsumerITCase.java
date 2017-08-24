@@ -20,6 +20,7 @@ package org.apache.flink.runtime.taskmanager;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.instance.ActorGateway;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
 import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
@@ -78,8 +79,8 @@ public class TaskCancelAsyncProducerConsumerITCase extends TestLogger {
 			Configuration config = new Configuration();
 			config.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, 1);
 			config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 1);
-			config.setInteger(ConfigConstants.TASK_MANAGER_MEMORY_SEGMENT_SIZE_KEY, 4096);
-			config.setInteger(ConfigConstants.TASK_MANAGER_NETWORK_NUM_BUFFERS_KEY, 8);
+			config.setInteger(TaskManagerOptions.MEMORY_SEGMENT_SIZE, 4096);
+			config.setInteger(TaskManagerOptions.NETWORK_NUM_BUFFERS, 8);
 
 			flink = new TestingCluster(config, true);
 			flink.start();
@@ -125,12 +126,12 @@ public class TaskCancelAsyncProducerConsumerITCase extends TestLogger {
 					break;
 				} else {
 					// Retry
-					Thread.sleep(500);
+					Thread.sleep(500L);
 				}
 			}
 
 			// Verify that async producer is in blocking request
-			assertTrue("Producer thread is not blocked: " + Arrays.toString(ASYNC_CONSUMER_THREAD.getStackTrace()), producerBlocked);
+			assertTrue("Producer thread is not blocked: " + Arrays.toString(ASYNC_PRODUCER_THREAD.getStackTrace()), producerBlocked);
 
 			boolean consumerWaiting = false;
 			for (int i = 0; i < 50; i++) {
@@ -144,7 +145,7 @@ public class TaskCancelAsyncProducerConsumerITCase extends TestLogger {
 					break;
 				} else {
 					// Retry
-					Thread.sleep(500);
+					Thread.sleep(500L);
 				}
 			}
 

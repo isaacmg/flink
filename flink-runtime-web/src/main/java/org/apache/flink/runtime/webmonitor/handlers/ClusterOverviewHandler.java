@@ -18,17 +18,17 @@
 
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import com.fasterxml.jackson.core.JsonGenerator;
-import org.apache.flink.runtime.instance.ActorGateway;
-import org.apache.flink.runtime.messages.webmonitor.RequestStatusOverview;
+import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.messages.webmonitor.StatusOverview;
 import org.apache.flink.runtime.util.EnvironmentInformation;
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.FiniteDuration;
+
+import com.fasterxml.jackson.core.JsonGenerator;
 
 import java.io.StringWriter;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -44,9 +44,9 @@ public class ClusterOverviewHandler extends AbstractJsonRequestHandler {
 
 	private static final String commitID = EnvironmentInformation.getRevisionInformation().commitId;
 
-	private final FiniteDuration timeout;
-	
-	public ClusterOverviewHandler(FiniteDuration timeout) {
+	private final Time timeout;
+
+	public ClusterOverviewHandler(Time timeout) {
 		this.timeout = checkNotNull(timeout);
 	}
 
@@ -56,15 +56,16 @@ public class ClusterOverviewHandler extends AbstractJsonRequestHandler {
 	}
 
 	@Override
-	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, ActorGateway jobManager) throws Exception {
+	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, JobManagerGateway jobManagerGateway) throws Exception {
 		// we need no parameters, get all requests
 		try {
-			if (jobManager != null) {
-				Future<Object> future = jobManager.ask(RequestStatusOverview.getInstance(), timeout);
-				StatusOverview overview = (StatusOverview) Await.result(future, timeout);
+			if (jobManagerGateway != null) {
+				CompletableFuture<StatusOverview> overviewFuture = jobManagerGateway.requestStatusOverview(timeout);
+
+				StatusOverview overview = overviewFuture.get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
 
 				StringWriter writer = new StringWriter();
-				JsonGenerator gen = JsonFactory.jacksonFactory.createGenerator(writer);
+				JsonGenerator gen = JsonFactory.JACKSON_FACTORY.createGenerator(writer);
 
 				gen.writeStartObject();
 				gen.writeNumberField("taskmanagers", overview.getNumTaskManagersConnected());

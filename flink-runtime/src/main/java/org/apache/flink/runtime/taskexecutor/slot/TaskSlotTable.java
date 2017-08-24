@@ -291,8 +291,6 @@ public class TaskSlotTable implements TimeoutListener<AllocationID> {
 		TaskSlot taskSlot = getTaskSlot(allocationId);
 
 		if (taskSlot != null) {
-			LOG.info("Free slot {}.", allocationId, cause);
-
 			final JobID jobId = taskSlot.getJobId();
 
 			if (taskSlot.markFree()) {
@@ -507,6 +505,16 @@ public class TaskSlotTable implements TimeoutListener<AllocationID> {
 	 */
 	public Iterator<Task> getTasks(JobID jobId) {
 		return new TaskIterator(jobId);
+	}
+
+	/**
+	 * Get the current allocation for the task slot with the given index.
+	 *
+	 * @param index identifying the slot for which the allocation id shall be retrieved
+	 * @return Allocation id of the specified slot if allocated; otherwise null
+	 */
+	public AllocationID getCurrentAllocation(int index) {
+		return taskSlots.get(index).getAllocationId();
 	}
 
 	// ---------------------------------------------------------------------

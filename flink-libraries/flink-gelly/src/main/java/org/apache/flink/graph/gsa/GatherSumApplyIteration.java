@@ -105,7 +105,7 @@ public class GatherSumApplyIteration<K, VV, EV, M> implements CustomUnaryOperati
 	}
 
 	/**
-	 * Computes the results of the gather-sum-apply iteration
+	 * Computes the results of the gather-sum-apply iteration.
 	 *
 	 * @return The resulting DataSet
 	 */
@@ -161,7 +161,7 @@ public class GatherSumApplyIteration<K, VV, EV, M> implements CustomUnaryOperati
 		}
 
 		// Prepare the neighbors
-		if(this.configuration != null) {
+		if (this.configuration != null) {
 			direction = this.configuration.getDirection();
 		}
 		DataSet<Tuple2<K, Neighbor<VV, EV>>> neighbors;
@@ -169,24 +169,24 @@ public class GatherSumApplyIteration<K, VV, EV, M> implements CustomUnaryOperati
 			case OUT:
 				neighbors = iteration
 				.getWorkset().join(edgeDataSet)
-				.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<K, VV, EV>());
+				.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<>());
 				break;
 			case IN:
 				neighbors = iteration
 				.getWorkset().join(edgeDataSet)
-				.where(0).equalTo(1).with(new ProjectKeyWithNeighborIN<K, VV, EV>());
+				.where(0).equalTo(1).with(new ProjectKeyWithNeighborIN<>());
 				break;
 			case ALL:
 				neighbors =  iteration
 						.getWorkset().join(edgeDataSet)
-						.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<K, VV, EV>()).union(iteration
+						.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<>()).union(iteration
 								.getWorkset().join(edgeDataSet)
-								.where(0).equalTo(1).with(new ProjectKeyWithNeighborIN<K, VV, EV>()));
+								.where(0).equalTo(1).with(new ProjectKeyWithNeighborIN<>()));
 				break;
 			default:
 				neighbors = iteration
 						.getWorkset().join(edgeDataSet)
-						.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<K, VV, EV>());
+						.where(0).equalTo(0).with(new ProjectKeyWithNeighborOUT<>());
 				break;
 		}
 
@@ -246,7 +246,7 @@ public class GatherSumApplyIteration<K, VV, EV, M> implements CustomUnaryOperati
 	}
 
 	/**
-	 * Creates a new gather-sum-apply iteration operator for graphs
+	 * Creates a new gather-sum-apply iteration operator for graphs.
 	 *
 	 * @param edges The edge DataSet
 	 *

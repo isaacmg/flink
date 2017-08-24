@@ -18,7 +18,6 @@
 
 package org.apache.flink.graph.library.clustering.directed;
 
-import org.apache.commons.math3.util.CombinatoricsUtils;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.graph.asm.AsmTestBase;
 import org.apache.flink.graph.asm.dataset.ChecksumHashCode.Checksum;
@@ -26,13 +25,17 @@ import org.apache.flink.graph.library.clustering.directed.LocalClusteringCoeffic
 import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.types.LongValue;
-import org.apache.flink.types.NullValue;
+
+import org.apache.commons.math3.util.CombinatoricsUtils;
 import org.junit.Test;
 
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 
+/**
+ * Tests for {@link LocalClusteringCoefficient}.
+ */
 public class LocalClusteringCoefficientTest
 extends AsmTestBase {
 
@@ -48,7 +51,7 @@ extends AsmTestBase {
 			"(5,1,0)";
 
 		DataSet<Result<IntValue>> cc = directedSimpleGraph
-			.run(new LocalClusteringCoefficient<IntValue, NullValue, NullValue>());
+			.run(new LocalClusteringCoefficient<>());
 
 		TestBaseUtils.compareResultAsText(cc.collect(), expectedResult);
 	}
@@ -57,10 +60,10 @@ extends AsmTestBase {
 	public void testCompleteGraph()
 			throws Exception {
 		long expectedDegree = completeGraphVertexCount - 1;
-		long expectedTriangleCount = 2 * CombinatoricsUtils.binomialCoefficient((int)expectedDegree, 2);
+		long expectedTriangleCount = 2 * CombinatoricsUtils.binomialCoefficient((int) expectedDegree, 2);
 
 		DataSet<Result<LongValue>> cc = completeGraph
-			.run(new LocalClusteringCoefficient<LongValue, NullValue, NullValue>());
+			.run(new LocalClusteringCoefficient<>());
 
 		List<Result<LongValue>> results = cc.collect();
 
@@ -75,8 +78,8 @@ extends AsmTestBase {
 	@Test
 	public void testRMatGraph()
 			throws Exception {
-		DataSet<Result<LongValue>> cc = directedRMatGraph
-			.run(new LocalClusteringCoefficient<LongValue, NullValue, NullValue>());
+		DataSet<Result<LongValue>> cc = directedRMatGraph(10, 16)
+			.run(new LocalClusteringCoefficient<>());
 
 		Checksum checksum = new org.apache.flink.graph.asm.dataset.ChecksumHashCode<Result<LongValue>>()
 			.run(cc)

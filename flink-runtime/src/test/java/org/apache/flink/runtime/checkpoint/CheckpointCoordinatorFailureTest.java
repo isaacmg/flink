@@ -23,12 +23,17 @@ import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
 import org.apache.flink.runtime.messages.checkpoint.AcknowledgeCheckpoint;
+import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.OperatorStateHandle;
+import org.apache.flink.runtime.state.SharedStateRegistry;
+import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.util.TestLogger;
+
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
 
@@ -39,7 +44,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @RunWith(PowerMockRunner.class)
 @PrepareForTest(PendingCheckpoint.class)
@@ -72,7 +79,8 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 			new StandaloneCheckpointIDCounter(),
 			new FailingCompletedCheckpointStore(),
 			null,
-			Executors.directExecutor());
+			Executors.directExecutor(),
+			SharedStateRegistry.DEFAULT_FACTORY);
 
 		coord.triggerCheckpoint(triggerTimestamp, false);
 
@@ -84,10 +92,26 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 
 		final long checkpointId = coord.getPendingCheckpoints().keySet().iterator().next();
 
-		AcknowledgeCheckpoint acknowledgeMessage = new AcknowledgeCheckpoint(jid, executionAttemptId, checkpointId);
 
-		CompletedCheckpoint completedCheckpoint = mock(CompletedCheckpoint.class);
-		PowerMockito.whenNew(CompletedCheckpoint.class).withAnyArguments().thenReturn(completedCheckpoint);
+		StreamStateHandle legacyHandle = mock(StreamStateHandle.class);
+		KeyedStateHandle managedKeyedHandle = mock(KeyedStateHandle.class);
+		KeyedStateHandle rawKeyedHandle = mock(KeyedStateHandle.class);
+		OperatorStateHandle managedOpHandle = mock(OperatorStateHandle.class);
+		OperatorStateHandle rawOpHandle = mock(OperatorStateHandle.class);
+
+		final OperatorSubtaskState operatorSubtaskState = spy(new OperatorSubtaskState(
+			legacyHandle,
+			managedOpHandle,
+			rawOpHandle,
+			managedKeyedHandle,
+			rawKeyedHandle));
+
+		TaskStateSnapshot subtaskState = spy(new TaskStateSnapshot());
+		subtaskState.putSubtaskStateByOperatorID(new OperatorID(), operatorSubtaskState);
+
+		when(subtaskState.getSubtaskStateByOperatorID(OperatorID.fromJobVertexID(vertex.getJobvertexId()))).thenReturn(operatorSubtaskState);
+
+		AcknowledgeCheckpoint acknowledgeMessage = new AcknowledgeCheckpoint(jid, executionAttemptId, checkpointId, new CheckpointMetrics(), subtaskState);
 
 		try {
 			coord.receiveAcknowledgeMessage(acknowledgeMessage);
@@ -100,7 +124,13 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		// make sure that the pending checkpoint has been discarded after we could not complete it
 		assertTrue(pendingCheckpoint.isDiscarded());
 
-		verify(completedCheckpoint).discard();
+		// make sure that the subtask state has been discarded after we could not complete it.
+		verify(operatorSubtaskState).discardState();
+		verify(operatorSubtaskState.getLegacyOperatorState()).discardState();
+		verify(operatorSubtaskState.getManagedOperatorState().iterator().next()).discardState();
+		verify(operatorSubtaskState.getRawOperatorState().iterator().next()).discardState();
+		verify(operatorSubtaskState.getManagedKeyedState().iterator().next()).discardState();
+		verify(operatorSubtaskState.getRawKeyedState().iterator().next()).discardState();
 	}
 
 	private static final class FailingCompletedCheckpointStore implements CompletedCheckpointStore {

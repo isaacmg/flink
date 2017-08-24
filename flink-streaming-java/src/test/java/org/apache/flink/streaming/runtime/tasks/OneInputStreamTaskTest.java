@@ -34,21 +34,21 @@ import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.SubtaskState;
+import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.runtime.state.TaskStateHandles;
 import org.apache.flink.streaming.api.collector.selector.OutputSelector;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
-import org.apache.flink.streaming.api.operators.StreamMap;
 import org.apache.flink.streaming.api.operators.StreamCheckpointedOperator;
+import org.apache.flink.streaming.api.operators.StreamMap;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.partitioner.BroadcastPartitioner;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -61,13 +61,21 @@ import org.apache.flink.util.TestLogger;
 import org.junit.Assert;
 import org.junit.Test;
 
-import scala.concurrent.duration.Deadline;
-import scala.concurrent.duration.FiniteDuration;
-
 import java.io.Serializable;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+
+import scala.concurrent.duration.Deadline;
+import scala.concurrent.duration.FiniteDuration;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -77,8 +85,7 @@ import static org.junit.Assert.fail;
 /**
  * Tests for {@link OneInputStreamTask}.
  *
- * <p>
- * Note:<br>
+ * <p>Note:<br>
  * We only use a {@link StreamMap} operator here. We also test the individual operators but Map is
  * used as a representative to test OneInputStreamTask, since OneInputStreamTask is used for all
  * OneInputStreamOperators.
@@ -102,6 +109,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		StreamMap<String, String> mapOperator = new StreamMap<String, String>(new TestOpenCloseMapFunction());
 		streamConfig.setStreamOperator(mapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		long initialTime = 0L;
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
@@ -144,6 +152,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		StreamMap<String, String> mapOperator = new StreamMap<String, String>(new IdentityMap());
 		streamConfig.setStreamOperator(mapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -238,7 +247,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 	 * It also verifies that when task is idle, watermarks generated in the middle of chains are also blocked and
 	 * never forwarded.
 	 *
-	 * The tested chain will be: (HEAD: normal operator) --> (watermark generating operator) --> (normal operator).
+	 * <p>The tested chain will be: (HEAD: normal operator) --> (watermark generating operator) --> (normal operator).
 	 * The operators will throw an exception and fail the test if either of them were forwarded watermarks when
 	 * the task is idle.
 	 */
@@ -254,15 +263,21 @@ public class OneInputStreamTaskTest extends TestLogger {
 		// ------------------ setup the chain ------------------
 
 		TriggerableFailOnWatermarkTestOperator headOperator = new TriggerableFailOnWatermarkTestOperator();
+		OperatorID headOperatorId = new OperatorID();
+
 		StreamConfig headOperatorConfig = testHarness.getStreamConfig();
 
 		WatermarkGeneratingTestOperator watermarkOperator = new WatermarkGeneratingTestOperator();
+		OperatorID watermarkOperatorId = new OperatorID();
+
 		StreamConfig watermarkOperatorConfig = new StreamConfig(new Configuration());
 
 		TriggerableFailOnWatermarkTestOperator tailOperator = new TriggerableFailOnWatermarkTestOperator();
+		OperatorID tailOperatorId = new OperatorID();
 		StreamConfig tailOperatorConfig = new StreamConfig(new Configuration());
 
 		headOperatorConfig.setStreamOperator(headOperator);
+		headOperatorConfig.setOperatorID(headOperatorId);
 		headOperatorConfig.setChainStart();
 		headOperatorConfig.setChainIndex(0);
 		headOperatorConfig.setChainedOutputs(Collections.singletonList(new StreamEdge(
@@ -275,6 +290,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		)));
 
 		watermarkOperatorConfig.setStreamOperator(watermarkOperator);
+		watermarkOperatorConfig.setOperatorID(watermarkOperatorId);
 		watermarkOperatorConfig.setTypeSerializerIn1(StringSerializer.INSTANCE);
 		watermarkOperatorConfig.setChainIndex(1);
 		watermarkOperatorConfig.setChainedOutputs(Collections.singletonList(new StreamEdge(
@@ -296,6 +312,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 			null));
 
 		tailOperatorConfig.setStreamOperator(tailOperator);
+		tailOperatorConfig.setOperatorID(tailOperatorId);
 		tailOperatorConfig.setTypeSerializerIn1(StringSerializer.INSTANCE);
 		tailOperatorConfig.setBufferTimeout(0);
 		tailOperatorConfig.setChainIndex(2);
@@ -405,6 +422,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		StreamMap<String, String> mapOperator = new StreamMap<String, String>(new IdentityMap());
 		streamConfig.setStreamOperator(mapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -464,6 +482,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		StreamConfig streamConfig = testHarness.getStreamConfig();
 		StreamMap<String, String> mapOperator = new StreamMap<String, String>(new IdentityMap());
 		streamConfig.setStreamOperator(mapOperator);
+		streamConfig.setOperatorID(new OperatorID());
 
 		ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<Object>();
 		long initialTime = 0L;
@@ -506,7 +525,6 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 		TestHarnessUtil.assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
 
-
 		// Then give the earlier barrier, these should be ignored
 		testHarness.processEvent(new CheckpointBarrier(0, 0, CheckpointOptions.forFullCheckpoint()), 0, 1);
 		testHarness.processEvent(new CheckpointBarrier(0, 0, CheckpointOptions.forFullCheckpoint()), 1, 0);
@@ -523,7 +541,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 	/**
 	 * Tests that the stream operator can snapshot and restore the operator state of chained
-	 * operators
+	 * operators.
 	 */
 	@Test
 	public void testSnapshottingAndRestoring() throws Exception {
@@ -561,7 +579,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 		CheckpointMetaData checkpointMetaData = new CheckpointMetaData(checkpointId, checkpointTimestamp);
 
-		while(!streamTask.triggerCheckpoint(checkpointMetaData, CheckpointOptions.forFullCheckpoint()));
+		while (!streamTask.triggerCheckpoint(checkpointMetaData, CheckpointOptions.forFullCheckpoint())) {}
 
 		// since no state was set, there shouldn't be restore calls
 		assertEquals(0, TestingStreamOperator.numberRestoreCalls);
@@ -574,14 +592,19 @@ public class OneInputStreamTaskTest extends TestLogger {
 		testHarness.waitForTaskCompletion(deadline.timeLeft().toMillis());
 
 		final OneInputStreamTask<String, String> restoredTask = new OneInputStreamTask<String, String>();
-		restoredTask.setInitialState(new TaskStateHandles(env.getCheckpointStateHandles()));
 
-		final OneInputStreamTaskTestHarness<String, String> restoredTaskHarness = new OneInputStreamTaskTestHarness<String, String>(restoredTask, BasicTypeInfo.STRING_TYPE_INFO, BasicTypeInfo.STRING_TYPE_INFO);
+		final OneInputStreamTaskTestHarness<String, String> restoredTaskHarness =
+			new OneInputStreamTaskTestHarness<String, String>(restoredTask, BasicTypeInfo.STRING_TYPE_INFO, BasicTypeInfo.STRING_TYPE_INFO);
 		restoredTaskHarness.configureForKeyedStream(keySelector, BasicTypeInfo.STRING_TYPE_INFO);
 
 		StreamConfig restoredTaskStreamConfig = restoredTaskHarness.getStreamConfig();
 
 		configureChainedTestingStreamOperator(restoredTaskStreamConfig, numberChainedTasks, seed, recoveryTimestamp);
+
+		TaskStateSnapshot stateHandles = env.getCheckpointStateHandles();
+		Assert.assertEquals(numberChainedTasks, stateHandles.getSubtaskStateMappings().size());
+
+		restoredTask.setInitialState(stateHandles);
 
 		TestingStreamOperator.numberRestoreCalls = 0;
 
@@ -594,6 +617,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 		TestingStreamOperator.numberRestoreCalls = 0;
 	}
+
 
 	//==============================================================================================
 	// Utility functions and classes
@@ -612,6 +636,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 		TestingStreamOperator<Integer, Integer> previousOperator = new TestingStreamOperator<>(random.nextLong(), recoveryTimestamp);
 		streamConfig.setStreamOperator(previousOperator);
+		streamConfig.setOperatorID(new OperatorID(0L, 0L));
 
 		// create the chain of operators
 		Map<Integer, StreamConfig> chainedTaskConfigs = new HashMap<>(numberChainedTasks - 1);
@@ -621,6 +646,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 			TestingStreamOperator<Integer, Integer> chainedOperator = new TestingStreamOperator<>(random.nextLong(), recoveryTimestamp);
 			StreamConfig chainedConfig = new StreamConfig(new Configuration());
 			chainedConfig.setStreamOperator(chainedOperator);
+			chainedConfig.setOperatorID(new OperatorID(0L, chainedIndex));
 			chainedTaskConfigs.put(chainedIndex, chainedConfig);
 
 			StreamEdge outputEdge = new StreamEdge(
@@ -667,7 +693,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 	private static class AcknowledgeStreamMockEnvironment extends StreamMockEnvironment {
 		private volatile long checkpointId;
-		private volatile SubtaskState checkpointStateHandles;
+		private volatile TaskStateSnapshot checkpointStateHandles;
 
 		private final OneShotLatch checkpointLatch = new OneShotLatch();
 
@@ -682,12 +708,11 @@ public class OneInputStreamTaskTest extends TestLogger {
 			super(jobConfig, taskConfig, executionConfig, memorySize, inputSplitProvider, bufferSize);
 		}
 
-
 		@Override
 		public void acknowledgeCheckpoint(
 				long checkpointId,
 				CheckpointMetrics checkpointMetrics,
-				SubtaskState checkpointStateHandles) {
+				TaskStateSnapshot checkpointStateHandles) {
 
 			this.checkpointId = checkpointId;
 			this.checkpointStateHandles = checkpointStateHandles;
@@ -698,7 +723,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 			return checkpointLatch;
 		}
 
-		public SubtaskState getCheckpointStateHandles() {
+		public TaskStateSnapshot getCheckpointStateHandles() {
 			return checkpointStateHandles;
 		}
 	}
@@ -721,7 +746,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		public void open() throws Exception {
 			super.open();
 
-			ListState<Integer> partitionableState = getOperatorStateBackend().getOperatorState(TEST_DESCRIPTOR);
+			ListState<Integer> partitionableState = getOperatorStateBackend().getListState(TEST_DESCRIPTOR);
 
 			if (numberSnapshotCalls == 0) {
 				for (Integer v : partitionableState.get()) {
@@ -742,7 +767,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 		@Override
 		public void snapshotState(StateSnapshotContext context) throws Exception {
 			ListState<Integer> partitionableState =
-					getOperatorStateBackend().getOperatorState(TEST_DESCRIPTOR);
+					getOperatorStateBackend().getListState(TEST_DESCRIPTOR);
 			partitionableState.clear();
 
 			partitionableState.add(42);
@@ -793,8 +818,8 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 			ClassLoader cl = Thread.currentThread().getContextClassLoader();
 
-			Serializable functionState= InstantiationUtil.deserializeObject(in, cl);
-			Integer operatorState= InstantiationUtil.deserializeObject(in, cl);
+			Serializable functionState = InstantiationUtil.deserializeObject(in, cl);
+			Integer operatorState = InstantiationUtil.deserializeObject(in, cl);
 
 			assertEquals(random.nextInt(), functionState);
 			assertEquals(random.nextInt(), (int) operatorState);
@@ -885,7 +910,7 @@ public class OneInputStreamTaskTest extends TestLogger {
 	 * An operator that can be triggered whether or not to expect watermarks forwarded to it, toggled
 	 * by letting it process special trigger marker records.
 	 *
-	 * If it receives a watermark when it's not expecting one, it'll throw an exception and fail.
+	 * <p>If it receives a watermark when it's not expecting one, it'll throw an exception and fail.
 	 */
 	private static class TriggerableFailOnWatermarkTestOperator
 			extends AbstractStreamOperator<String>
@@ -893,8 +918,8 @@ public class OneInputStreamTaskTest extends TestLogger {
 
 		private static final long serialVersionUID = 2048954179291813243L;
 
-		public final static String EXPECT_FORWARDED_WATERMARKS_MARKER = "EXPECT_WATERMARKS";
-		public final static String NO_FORWARDED_WATERMARKS_MARKER = "NO_WATERMARKS";
+		public static final String EXPECT_FORWARDED_WATERMARKS_MARKER = "EXPECT_WATERMARKS";
+		public static final String NO_FORWARDED_WATERMARKS_MARKER = "NO_WATERMARKS";
 
 		protected boolean expectForwardedWatermarks;
 

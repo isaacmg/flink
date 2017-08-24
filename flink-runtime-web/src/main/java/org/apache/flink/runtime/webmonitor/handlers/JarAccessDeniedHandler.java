@@ -18,10 +18,13 @@
 
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import org.apache.flink.runtime.instance.ActorGateway;
+import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 
 import java.util.Map;
 
+/**
+ * Handler to deny access to jar-related REST calls.
+ */
 public class JarAccessDeniedHandler extends AbstractJsonRequestHandler {
 
 	private static final String ERROR_MESSAGE = "{\"error\": \"Web submission interface is not " +
@@ -39,7 +42,7 @@ public class JarAccessDeniedHandler extends AbstractJsonRequestHandler {
 	}
 
 	@Override
-	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, ActorGateway jobManager) throws Exception {
+	public String handleJsonRequest(Map<String, String> pathParams, Map<String, String> queryParams, JobManagerGateway jobManagerGateway) throws Exception {
 		return ERROR_MESSAGE;
 	}
 }

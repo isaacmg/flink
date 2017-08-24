@@ -18,21 +18,26 @@
 
 package org.apache.flink.runtime.blob;
 
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.util.FileUtils;
-import org.apache.flink.util.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URL;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -41,13 +46,13 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 /**
  * The BLOB cache implements a local cache for content-addressable BLOBs.
  *
- * <p>When requesting BLOBs through the {@link BlobCache#getURL} methods, the
+ * <p>When requesting BLOBs through the {@link BlobCache#getFile} methods, the
  * BLOB cache will first attempt to serve the file from its local cache. Only if
  * the local cache does not contain the desired BLOB, the BLOB cache will try to
  * download it from a distributed file system (if available) or the BLOB
  * server.</p>
  */
-public final class BlobCache implements BlobService {
+public class BlobCache extends TimerTask implements BlobService {
 
 	/** The log object used for debugging. */
 	private static final Logger LOG = LoggerFactory.getLogger(BlobCache.class);
@@ -58,7 +63,7 @@ public final class BlobCache implements BlobService {
 	private final File storageDir;
 
 	/** Blob store for distributed file storage, e.g. in HA */
-	private final BlobStore blobStore;
+	private final BlobView blobView;
 
 	private final AtomicBoolean shutdownRequested = new AtomicBoolean();
 
@@ -71,23 +76,31 @@ public final class BlobCache implements BlobService {
 	/** Configuration for the blob client like ssl parameters required to connect to the blob server */
 	private final Configuration blobClientConfig;
 
+	// --------------------------------------------------------------------------------------------
+
 	/**
-	 * Instantiates a new BLOB cache.
-	 *
-	 * @param serverAddress
-	 * 		address of the {@link BlobServer} to use for fetching files from
-	 * @param blobClientConfig
-	 * 		global configuration
-	 *
-	 * @throws IOException
-	 * 		thrown if the (local or distributed) file storage cannot be created or
-	 * 		is not usable
+	 * Job reference counters with a time-to-live (TTL).
 	 */
-	public BlobCache(InetSocketAddress serverAddress,
-			Configuration blobClientConfig) throws IOException {
-		this(serverAddress, blobClientConfig,
-			BlobUtils.createBlobStoreFromConfig(blobClientConfig));
+	private static class RefCount {
+		/**
+		 * Number of references to a job.
+		 */
+		public int references = 0;
+		
+		/**
+		 * Timestamp in milliseconds when any job data should be cleaned up (no cleanup for
+		 * non-positive values).
+		 */
+		public long keepUntil = -1;
 	}
+
+	/** Map to store the number of references to a specific job */
+	private final Map<JobID, RefCount> jobRefCounters = new HashMap<>();
+
+	/** Time interval (ms) to run the cleanup task; also used as the default TTL. */
+	private final long cleanupInterval;
+
+	private final Timer cleanupTimer;
 
 	/**
 	 * Instantiates a new BLOB cache.
@@ -96,195 +109,313 @@ public final class BlobCache implements BlobService {
 	 * 		address of the {@link BlobServer} to use for fetching files from
 	 * @param blobClientConfig
 	 * 		global configuration
-	 * 	@param haServices
-	 * 		high availability services able to create a distributed blob store
-	 *
-	 * @throws IOException
-	 * 		thrown if the (local or distributed) file storage cannot be created or
-	 * 		is not usable
-	 */
-	public BlobCache(InetSocketAddress serverAddress,
-		Configuration blobClientConfig, HighAvailabilityServices haServices) throws IOException {
-		this(serverAddress, blobClientConfig, haServices.createBlobStore());
-	}
-
-	/**
-	 * Instantiates a new BLOB cache.
-	 *
-	 * @param serverAddress
-	 * 		address of the {@link BlobServer} to use for fetching files from
-	 * @param blobClientConfig
-	 * 		global configuration
-	 * @param blobStore
+	 * @param blobView
 	 * 		(distributed) blob store file system to retrieve files from first
 	 *
 	 * @throws IOException
 	 * 		thrown if the (local or distributed) file storage cannot be created or is not usable
 	 */
-	private BlobCache(
-			final InetSocketAddress serverAddress, final Configuration blobClientConfig,
-			final BlobStore blobStore) throws IOException {
+	public BlobCache(
+			final InetSocketAddress serverAddress,
+			final Configuration blobClientConfig,
+			final BlobView blobView) throws IOException {
 		this.serverAddress = checkNotNull(serverAddress);
 		this.blobClientConfig = checkNotNull(blobClientConfig);
-		this.blobStore = blobStore;
+		this.blobView = checkNotNull(blobView, "blobStore");
 
 		// configure and create the storage directory
-		String storageDirectory = blobClientConfig.getString(ConfigConstants.BLOB_STORAGE_DIRECTORY_KEY, null);
-		this.storageDir = BlobUtils.initStorageDirectory(storageDirectory);
+		String storageDirectory = blobClientConfig.getString(BlobServerOptions.STORAGE_DIRECTORY);
+		this.storageDir = BlobUtils.initLocalStorageDirectory(storageDirectory);
 		LOG.info("Created BLOB cache storage directory " + storageDir);
 
 		// configure the number of fetch retries
-		final int fetchRetries = blobClientConfig.getInteger(
-			ConfigConstants.BLOB_FETCH_RETRIES_KEY, ConfigConstants.DEFAULT_BLOB_FETCH_RETRIES);
+		final int fetchRetries = blobClientConfig.getInteger(BlobServerOptions.FETCH_RETRIES);
 		if (fetchRetries >= 0) {
 			this.numFetchRetries = fetchRetries;
 		}
 		else {
 			LOG.warn("Invalid value for {}. System will attempt no retires on failed fetches of BLOBs.",
-				ConfigConstants.BLOB_FETCH_RETRIES_KEY);
+				BlobServerOptions.FETCH_RETRIES.key());
 			this.numFetchRetries = 0;
 		}
+
+		// Initializing the clean up task
+		this.cleanupTimer = new Timer(true);
+
+		cleanupInterval = blobClientConfig.getLong(BlobServerOptions.CLEANUP_INTERVAL) * 1000;
+		this.cleanupTimer.schedule(this, cleanupInterval, cleanupInterval);
 
 		// Add shutdown hook to delete storage directory
 		shutdownHook = BlobUtils.addShutdownHook(this, LOG);
 	}
 
 	/**
-	 * Returns the URL for the BLOB with the given key. The method will first attempt to serve
-	 * the BLOB from its local cache. If the BLOB is not in the cache, the method will try to download it
-	 * from this cache's BLOB server.
+	 * Registers use of job-related BLOBs.
+	 * <p>
+	 * Using any other method to access BLOBs, e.g. {@link #getFile}, is only valid within calls
+	 * to {@link #registerJob(JobID)} and {@link #releaseJob(JobID)}.
 	 *
-	 * @param requiredBlob The key of the desired BLOB.
-	 * @return URL referring to the local storage location of the BLOB.
-	 * @throws IOException Thrown if an I/O error occurs while downloading the BLOBs from the BLOB server.
+	 * @param jobId
+	 * 		ID of the job this blob belongs to
+	 *
+	 * @see #releaseJob(JobID)
 	 */
-	public URL getURL(final BlobKey requiredBlob) throws IOException {
+	public void registerJob(JobID jobId) {
+		synchronized (jobRefCounters) {
+			RefCount ref = jobRefCounters.get(jobId);
+			if (ref == null) {
+				ref = new RefCount();
+				jobRefCounters.put(jobId, ref);
+			}
+			++ref.references;
+		}
+	}
+
+	/**
+	 * Unregisters use of job-related BLOBs and allow them to be released.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to
+	 *
+	 * @see #registerJob(JobID)
+	 */
+	public void releaseJob(JobID jobId) {
+		synchronized (jobRefCounters) {
+			RefCount ref = jobRefCounters.get(jobId);
+
+			if (ref == null) {
+				LOG.warn("improper use of releaseJob() without a matching number of registerJob() calls");
+				return;
+			}
+
+			--ref.references;
+			if (ref.references == 0) {
+				ref.keepUntil = System.currentTimeMillis() + cleanupInterval;
+			}
+		}
+	}
+
+	/**
+	 * Returns local copy of the (job-unrelated) file for the BLOB with the given key.
+	 * <p>
+	 * The method will first attempt to serve the BLOB from its local cache. If the BLOB is not in
+	 * the cache, the method will try to download it from this cache's BLOB server.
+	 *
+	 * @param key
+	 * 		The key of the desired BLOB.
+	 *
+	 * @return file referring to the local storage location of the BLOB.
+	 *
+	 * @throws IOException
+	 * 		Thrown if an I/O error occurs while downloading the BLOBs from the BLOB server.
+	 */
+	@Override
+	public File getFile(BlobKey key) throws IOException {
+		return getFileInternal(null, key);
+	}
+
+	/**
+	 * Returns local copy of the file for the BLOB with the given key.
+	 * <p>
+	 * The method will first attempt to serve the BLOB from its local cache. If the BLOB is not in
+	 * the cache, the method will try to download it from this cache's BLOB server.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to
+	 * @param key
+	 * 		The key of the desired BLOB.
+	 *
+	 * @return file referring to the local storage location of the BLOB.
+	 *
+	 * @throws IOException
+	 * 		Thrown if an I/O error occurs while downloading the BLOBs from the BLOB server.
+	 */
+	@Override
+	public File getFile(JobID jobId, BlobKey key) throws IOException {
+		checkNotNull(jobId);
+		return getFileInternal(jobId, key);
+	}
+
+	/**
+	 * Returns local copy of the file for the BLOB with the given key.
+	 * <p>
+	 * The method will first attempt to serve the BLOB from its local cache. If the BLOB is not in
+	 * the cache, the method will try to download it from this cache's BLOB server.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to (or <tt>null</tt> if job-unrelated)
+	 * @param requiredBlob
+	 * 		The key of the desired BLOB.
+	 *
+	 * @return file referring to the local storage location of the BLOB.
+	 *
+	 * @throws IOException
+	 * 		Thrown if an I/O error occurs while downloading the BLOBs from the BLOB server.
+	 */
+	private File getFileInternal(@Nullable JobID jobId, BlobKey requiredBlob) throws IOException {
 		checkArgument(requiredBlob != null, "BLOB key cannot be null.");
 
-		final File localJarFile = BlobUtils.getStorageLocation(storageDir, requiredBlob);
+		final File localJarFile = BlobUtils.getStorageLocation(storageDir, jobId, requiredBlob);
 
 		if (localJarFile.exists()) {
-			return localJarFile.toURI().toURL();
+			return localJarFile;
 		}
 
 		// first try the distributed blob store (if available)
 		try {
-			blobStore.get(requiredBlob, localJarFile);
+			blobView.get(jobId, requiredBlob, localJarFile);
 		} catch (Exception e) {
 			LOG.info("Failed to copy from blob store. Downloading from BLOB server instead.", e);
 		}
 
 		if (localJarFile.exists()) {
-			return localJarFile.toURI().toURL();
+			return localJarFile;
 		}
 
 		// fallback: download from the BlobServer
 		final byte[] buf = new byte[BlobServerProtocol.BUFFER_SIZE];
+		LOG.info("Downloading {}/{} from {}", jobId, requiredBlob, serverAddress);
 
 		// loop over retries
 		int attempt = 0;
 		while (true) {
-
-			if (attempt == 0) {
-				LOG.info("Downloading {} from {}", requiredBlob, serverAddress);
-			} else {
-				LOG.info("Downloading {} from {} (retry {})", requiredBlob, serverAddress, attempt);
-			}
-
-			try {
-				BlobClient bc = null;
-				InputStream is = null;
-				OutputStream os = null;
-
-				try {
-					bc = new BlobClient(serverAddress, blobClientConfig);
-					is = bc.get(requiredBlob);
-					os = new FileOutputStream(localJarFile);
-
-					while (true) {
-						final int read = is.read(buf);
-						if (read < 0) {
-							break;
-						}
-						os.write(buf, 0, read);
+			try (
+				final BlobClient bc = new BlobClient(serverAddress, blobClientConfig);
+				final InputStream is = bc.getInternal(jobId, requiredBlob);
+				final OutputStream os = new FileOutputStream(localJarFile)
+			) {
+				while (true) {
+					final int read = is.read(buf);
+					if (read < 0) {
+						break;
 					}
-
-					// we do explicitly not use a finally block, because we want the closing
-					// in the regular case to throw exceptions and cause the writing to fail.
-					// But, the closing on exception should not throw further exceptions and
-					// let us keep the root exception
-					os.close();
-					os = null;
-					is.close();
-					is = null;
-					bc.close();
-					bc = null;
-
-					// success, we finished
-					return localJarFile.toURI().toURL();
+					os.write(buf, 0, read);
 				}
-				catch (Throwable t) {
-					// we use "catch (Throwable)" to keep the root exception. Otherwise that exception
-					// it would be replaced by any exception thrown in the finally block
-					IOUtils.closeQuietly(os);
-					IOUtils.closeQuietly(is);
-					IOUtils.closeQuietly(bc);
 
-					if (t instanceof IOException) {
-						throw (IOException) t;
-					} else {
-						throw new IOException(t.getMessage(), t);
-					}
-				}
+				// success, we finished
+				return localJarFile;
 			}
-			catch (IOException e) {
-				String message = "Failed to fetch BLOB " + requiredBlob + " from " + serverAddress +
+			catch (Throwable t) {
+				String message = "Failed to fetch BLOB " + jobId + "/" + requiredBlob + " from " + serverAddress +
 					" and store it under " + localJarFile.getAbsolutePath();
 				if (attempt < numFetchRetries) {
-					attempt++;
 					if (LOG.isDebugEnabled()) {
-						LOG.debug(message + " Retrying...", e);
+						LOG.debug(message + " Retrying...", t);
 					} else {
 						LOG.error(message + " Retrying...");
 					}
 				}
 				else {
-					LOG.error(message + " No retries left.", e);
-					throw new IOException(message, e);
+					LOG.error(message + " No retries left.", t);
+					throw new IOException(message, t);
 				}
+
+				// retry
+				++attempt;
+				LOG.info("Downloading {}/{} from {} (retry {})", jobId, requiredBlob, serverAddress, attempt);
 			}
 		} // end loop over retries
 	}
 
 	/**
-	 * Deletes the file associated with the given key from the BLOB cache.
-	 * @param key referring to the file to be deleted
+	 * Deletes the (job-unrelated) file associated with the blob key in this BLOB cache.
+	 *
+	 * @param key
+	 * 		blob key associated with the file to be deleted
+	 *
+	 * @throws IOException
 	 */
-	public void delete(BlobKey key) throws IOException{
-		final File localFile = BlobUtils.getStorageLocation(storageDir, key);
+	@Override
+	public void delete(BlobKey key) throws IOException {
+		deleteInternal(null, key);
+	}
 
-		if (localFile.exists() && !localFile.delete()) {
-			LOG.warn("Failed to delete locally cached BLOB " + key + " at " + localFile.getAbsolutePath());
+	/**
+	 * Deletes the file associated with the blob key in this BLOB cache.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to
+	 * @param key
+	 * 		blob key associated with the file to be deleted
+	 *
+	 * @throws IOException
+	 */
+	@Override
+	public void delete(JobID jobId, BlobKey key) throws IOException {
+		checkNotNull(jobId);
+		deleteInternal(jobId, key);
+	}
+
+	/**
+	 * Deletes the file associated with the blob key in this BLOB cache.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to (or <tt>null</tt> if job-unrelated)
+	 * @param key
+	 * 		blob key associated with the file to be deleted
+	 *
+	 * @throws IOException
+	 */
+	private void deleteInternal(@Nullable JobID jobId, BlobKey key) throws IOException{
+		final File localFile = BlobUtils.getStorageLocation(storageDir, jobId, key);
+		if (!localFile.delete() && localFile.exists()) {
+			LOG.warn("Failed to delete locally cached BLOB {} at {}", key, localFile.getAbsolutePath());
 		}
+	}
+
+	/**
+	 * Deletes the (job-unrelated) file associated with the given key from the BLOB cache and
+	 * BLOB server.
+	 *
+	 * @param key
+	 * 		referring to the file to be deleted
+	 *
+	 * @throws IOException
+	 * 		thrown if an I/O error occurs while transferring the request to the BLOB server or if the
+	 * 		BLOB server cannot delete the file
+	 */
+	public void deleteGlobal(BlobKey key) throws IOException {
+		deleteGlobalInternal(null, key);
+	}
+
+	/**
+	 * Deletes the file associated with the given key from the BLOB cache and BLOB server.
+	 *
+	 * @param jobId
+	 * 		ID of the job this blob belongs to
+	 * @param key
+	 * 		referring to the file to be deleted
+	 *
+	 * @throws IOException
+	 * 		thrown if an I/O error occurs while transferring the request to the BLOB server or if the
+	 * 		BLOB server cannot delete the file
+	 */
+	public void deleteGlobal(JobID jobId, BlobKey key) throws IOException {
+		checkNotNull(jobId);
+		deleteGlobalInternal(jobId, key);
 	}
 
 	/**
 	 * Deletes the file associated with the given key from the BLOB cache and
 	 * BLOB server.
 	 *
-	 * @param key referring to the file to be deleted
+	 * @param jobId
+	 * 		ID of the job this blob belongs to (or <tt>null</tt> if job-unrelated)
+	 * @param key
+	 * 		referring to the file to be deleted
+	 *
 	 * @throws IOException
-	 *         thrown if an I/O error occurs while transferring the request to
-	 *         the BLOB server or if the BLOB server cannot delete the file
+	 * 		thrown if an I/O error occurs while transferring the request to the BLOB server or if the
+	 * 		BLOB server cannot delete the file
 	 */
-	public void deleteGlobal(BlobKey key) throws IOException {
+	private void deleteGlobalInternal(@Nullable JobID jobId, BlobKey key) throws IOException {
 		// delete locally
-		delete(key);
+		deleteInternal(jobId, key);
 		// then delete on the BLOB server
 		// (don't use the distributed storage directly - this way the blob
 		// server is aware of the delete operation, too)
 		try (BlobClient bc = createClient()) {
-			bc.delete(key);
+			bc.deleteInternal(jobId, key);
 		}
 	}
 
@@ -293,29 +424,56 @@ public final class BlobCache implements BlobService {
 		return serverAddress.getPort();
 	}
 
+	/**
+	 * Cleans up BLOBs which are not referenced anymore.
+	 */
 	@Override
-	public void shutdown() {
+	public void run() {
+		synchronized (jobRefCounters) {
+			Iterator<Map.Entry<JobID, RefCount>> entryIter = jobRefCounters.entrySet().iterator();
+			final long currentTimeMillis = System.currentTimeMillis();
+
+			while (entryIter.hasNext()) {
+				Map.Entry<JobID, RefCount> entry = entryIter.next();
+				RefCount ref = entry.getValue();
+
+				if (ref.references <= 0 && ref.keepUntil > 0 && currentTimeMillis >= ref.keepUntil) {
+					JobID jobId = entry.getKey();
+
+					final File localFile =
+						new File(BlobUtils.getStorageLocationPath(storageDir.getAbsolutePath(), jobId));
+					try {
+						FileUtils.deleteDirectory(localFile);
+						// let's only remove this directory from cleanup if the cleanup was successful
+						entryIter.remove();
+					} catch (Throwable t) {
+						LOG.warn("Failed to locally delete job directory " + localFile.getAbsolutePath(), t);
+					}
+				}
+			}
+		}
+	}
+
+	@Override
+	public void close() throws IOException {
+		cleanupTimer.cancel();
+
 		if (shutdownRequested.compareAndSet(false, true)) {
 			LOG.info("Shutting down BlobCache");
 
 			// Clean up the storage directory
 			try {
 				FileUtils.deleteDirectory(storageDir);
-			}
-			catch (IOException e) {
-				LOG.error("BLOB cache failed to properly clean up its storage directory.");
-			}
-
-			// Remove shutdown hook to prevent resource leaks, unless this is invoked by the shutdown hook itself
-			if (shutdownHook != null && shutdownHook != Thread.currentThread()) {
-				try {
-					Runtime.getRuntime().removeShutdownHook(shutdownHook);
-				}
-				catch (IllegalStateException e) {
-					// race, JVM is in shutdown already, we can safely ignore this
-				}
-				catch (Throwable t) {
-					LOG.warn("Exception while unregistering BLOB cache's cleanup shutdown hook.");
+			} finally {
+				// Remove shutdown hook to prevent resource leaks, unless this is invoked by the shutdown hook itself
+				if (shutdownHook != null && shutdownHook != Thread.currentThread()) {
+					try {
+						Runtime.getRuntime().removeShutdownHook(shutdownHook);
+					} catch (IllegalStateException e) {
+						// race, JVM is in shutdown already, we can safely ignore this
+					} catch (Throwable t) {
+						LOG.warn("Exception while unregistering BLOB cache's cleanup shutdown hook.");
+					}
 				}
 			}
 		}
@@ -326,8 +484,19 @@ public final class BlobCache implements BlobService {
 		return new BlobClient(serverAddress, blobClientConfig);
 	}
 
-	public File getStorageDir() {
-		return this.storageDir;
+	/**
+	 * Returns a file handle to the file associated with the given blob key on the blob
+	 * server.
+	 *
+	 * <p><strong>This is only called from the {@link BlobServerConnection}</strong>
+	 *
+	 * @param jobId ID of the job this blob belongs to (or <tt>null</tt> if job-unrelated)
+	 * @param key identifying the file
+	 * @return file handle to the file
+	 */
+	@VisibleForTesting
+	public File getStorageLocation(JobID jobId, BlobKey key) {
+		return BlobUtils.getStorageLocation(storageDir, jobId, key);
 	}
 
 }

@@ -22,24 +22,23 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.concurrent.AcceptFunction;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.streaming.api.datastream.AsyncDataStream;
 import org.apache.flink.streaming.api.datastream.AsyncDataStream.OutputMode;
 import org.apache.flink.streaming.api.functions.async.AsyncFunction;
-import org.apache.flink.streaming.api.functions.async.collector.AsyncCollector;
+import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.async.queue.OrderedStreamElementQueue;
 import org.apache.flink.streaming.api.operators.async.queue.StreamElementQueue;
 import org.apache.flink.streaming.api.operators.async.queue.StreamElementQueueEntry;
 import org.apache.flink.streaming.api.operators.async.queue.StreamRecordQueueEntry;
-import org.apache.flink.streaming.api.operators.async.queue.WatermarkQueueEntry;
-import org.apache.flink.streaming.api.operators.async.queue.OrderedStreamElementQueue;
 import org.apache.flink.streaming.api.operators.async.queue.UnorderedStreamElementQueue;
+import org.apache.flink.streaming.api.operators.async.queue.WatermarkQueueEntry;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
@@ -58,16 +57,16 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * The {@link AsyncWaitOperator} allows to asynchronously process incoming stream records. For that
- * the operator creates an {@link AsyncCollector} which is passed to an {@link AsyncFunction}.
+ * the operator creates an {@link ResultFuture} which is passed to an {@link AsyncFunction}.
  * Within the async function, the user can complete the async collector arbitrarily. Once the async
  * collector has been completed, the result is emitted by the operator's emitter to downstream
  * operators.
- * 
+ *
  * <p>The operator offers different output modes depending on the chosen
  * {@link OutputMode}. In order to give exactly once processing guarantees, the
  * operator stores all currently in-flight {@link StreamElement} in it's operator state. Upon
  * recovery the recorded set of stream elements is replayed.
- * 
+ *
  * <p>In case of chaining of this operator, it has to be made sure that the operators in the chain are
  * opened tail to head. The reason for this is that an opened {@link AsyncWaitOperator} starts
  * already emitting recovered {@link StreamElement} to downstream operators.
@@ -83,13 +82,13 @@ public class AsyncWaitOperator<IN, OUT>
 
 	private static final String STATE_NAME = "_async_wait_operator_state_";
 
-	/** Capacity of the stream element queue */
+	/** Capacity of the stream element queue. */
 	private final int capacity;
 
-	/** Output mode for this operator */
+	/** Output mode for this operator. */
 	private final AsyncDataStream.OutputMode outputMode;
 
-	/** Timeout for the async collectors */
+	/** Timeout for the async collectors. */
 	private final long timeout;
 
 	protected transient Object checkpointingLock;
@@ -97,23 +96,22 @@ public class AsyncWaitOperator<IN, OUT>
 	/** {@link TypeSerializer} for inputs while making snapshots. */
 	private transient StreamElementSerializer<IN> inStreamElementSerializer;
 
-	/** Recovered input stream elements */
+	/** Recovered input stream elements. */
 	private transient ListState<StreamElement> recoveredStreamElements;
 
-	/** Queue to store the currently in-flight stream elements into */
+	/** Queue to store the currently in-flight stream elements into. */
 	private transient StreamElementQueue queue;
 
-	/** Pending stream element which could not yet added to the queue */
+	/** Pending stream element which could not yet added to the queue. */
 	private transient StreamElementQueueEntry<?> pendingStreamElementQueueEntry;
 
 	private transient ExecutorService executor;
 
-	/** Emitter for the completed stream element queue entries */
+	/** Emitter for the completed stream element queue entries. */
 	private transient Emitter<OUT> emitter;
 
-	/** Thread running the emitter */
+	/** Thread running the emitter. */
 	private transient Thread emitterThread;
-
 
 	public AsyncWaitOperator(
 			AsyncFunction<IN, OUT> asyncFunction,
@@ -211,19 +209,18 @@ public class AsyncWaitOperator<IN, OUT>
 				new ProcessingTimeCallback() {
 					@Override
 					public void onProcessingTime(long timestamp) throws Exception {
-						streamRecordBufferEntry.collect(
+						streamRecordBufferEntry.completeExceptionally(
 							new TimeoutException("Async function call has timed out."));
 					}
 				});
 
 			// Cancel the timer once we've completed the stream record buffer entry. This will remove
 			// the register trigger task
-			streamRecordBufferEntry.onComplete(new AcceptFunction<StreamElementQueueEntry<Collection<OUT>>>() {
-				@Override
-				public void accept(StreamElementQueueEntry<Collection<OUT>> value) {
+			streamRecordBufferEntry.onComplete(
+				(StreamElementQueueEntry<Collection<OUT>> value) -> {
 					timerFuture.cancel(true);
-				}
-			}, executor);
+				},
+				executor);
 		}
 
 		addAsyncBufferEntry(streamRecordBufferEntry);
@@ -243,7 +240,7 @@ public class AsyncWaitOperator<IN, OUT>
 		super.snapshotState(context);
 
 		ListState<StreamElement> partitionableState =
-			getOperatorStateBackend().getOperatorState(new ListStateDescriptor<>(STATE_NAME, inStreamElementSerializer));
+			getOperatorStateBackend().getListState(new ListStateDescriptor<>(STATE_NAME, inStreamElementSerializer));
 		partitionableState.clear();
 
 		Collection<StreamElementQueueEntry<?>> values = queue.values();
@@ -269,7 +266,7 @@ public class AsyncWaitOperator<IN, OUT>
 	public void initializeState(StateInitializationContext context) throws Exception {
 		recoveredStreamElements = context
 			.getOperatorStateStore()
-			.getOperatorState(new ListStateDescriptor<>(STATE_NAME, inStreamElementSerializer));
+			.getListState(new ListStateDescriptor<>(STATE_NAME, inStreamElementSerializer));
 
 	}
 
@@ -368,7 +365,7 @@ public class AsyncWaitOperator<IN, OUT>
 				Thread.currentThread().interrupt();
 			}
 
-			/**
+			/*
 			 * FLINK-5638: If we have the checkpoint lock we might have to free it for a while so
 			 * that the emitter thread can complete/react to the interrupt signal.
 			 */
@@ -387,8 +384,8 @@ public class AsyncWaitOperator<IN, OUT>
 	/**
 	 * Add the given stream element queue entry to the operator's stream element queue. This
 	 * operation blocks until the element has been added.
-	 * <p>
-	 * For that it tries to put the element into the queue and if not successful then it waits on
+	 *
+	 * <p>For that it tries to put the element into the queue and if not successful then it waits on
 	 * the checkpointing lock. The checkpointing lock is also used by the {@link Emitter} to output
 	 * elements. The emitter is also responsible for notifying this method if the queue has capacity
 	 * left again, by calling notifyAll on the checkpointing lock.
